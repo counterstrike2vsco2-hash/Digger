@@ -1,0 +1,127 @@
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+  background: #050505; color: #d9d4c4;
+  font-family: "Courier New", Courier, monospace;
+  user-select: none; -webkit-user-select: none; touch-action: none;
+}
+canvas#game { position: fixed; inset: 0; display: block; cursor: crosshair; }
+.hidden { display: none !important; }
+
+/* ---------- HUD ---------- */
+#hud { position: fixed; top: 10px; left: 10px; pointer-events: none; z-index: 5; }
+#hud .panel {
+  background: rgba(10,10,10,.72); border: 1px solid #3a3a32; border-left: 4px solid #e8c547;
+  padding: 8px 12px; font-size: 14px; line-height: 1.5; min-width: 200px;
+}
+#hLevel { color: #e8c547; font-weight: bold; letter-spacing: 2px; }
+.bat { display: flex; align-items: center; gap: 6px; }
+.batbar { width: 110px; height: 10px; border: 1px solid #777; background: #111; }
+#batFill { height: 100%; width: 100%; background: #9fd36a; transition: width .2s; }
+#batTxt { font-size: 12px; width: 40px; }
+#roomName {
+  margin-top: 8px; font-size: 13px; color: #a9b8a0; letter-spacing: 1px;
+  text-shadow: 0 0 6px #000; transition: opacity .4s;
+}
+#prompt {
+  position: fixed; left: 50%; bottom: 18%; transform: translateX(-50%);
+  background: rgba(0,0,0,.8); border: 1px solid #e8c547; color: #e8c547;
+  padding: 8px 16px; font-size: 16px; font-weight: bold; z-index: 6; pointer-events: none;
+  white-space: nowrap;
+}
+#log {
+  position: fixed; left: 10px; bottom: 12px; z-index: 5; pointer-events: none;
+  display: flex; flex-direction: column; gap: 3px; max-width: 60vw;
+}
+#log div {
+  background: rgba(0,0,0,.65); padding: 3px 8px; font-size: 13px; border-left: 3px solid #777;
+  animation: fadein .2s ease-out;
+}
+#log div.good { border-color: #9fd36a; color: #cfeab0; }
+#log div.bad { border-color: #e04b3a; color: #ffb2a8; }
+#log div.info { border-color: #e8c547; color: #f0e2a8; }
+@keyframes fadein { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: none; } }
+
+/* ---------- Screens ---------- */
+.screen {
+  position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at center, rgba(30,28,22,.92) 0%, rgba(0,0,0,.97) 75%);
+  overflow-y: auto; padding: 16px;
+}
+.box {
+  max-width: 640px; width: 100%; text-align: center; padding: 24px 22px;
+  border: 2px solid #3d3a30; background: rgba(12,12,10,.85);
+  box-shadow: 0 0 40px rgba(0,0,0,.8), inset 0 0 60px rgba(0,0,0,.6);
+  margin: auto;
+}
+.box.small { max-width: 420px; }
+.stencil {
+  display: inline-block; font-size: 11px; letter-spacing: 3px; color: #111; background: repeating-linear-gradient(45deg,#e8c547 0 12px,#1a1a1a 12px 24px);
+  padding: 4px 10px; font-weight: bold;
+}
+.stencil { color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; }
+h1 {
+  font-size: clamp(44px, 12vw, 84px); margin: 12px 0 0; letter-spacing: 10px; color: #e8c547;
+  text-shadow: 3px 3px 0 #6b1d14, 0 0 30px rgba(232,197,71,.25);
+}
+h2 { margin: 2px 0 14px; letter-spacing: 12px; color: #c0392b; font-size: clamp(22px, 6vw, 34px); }
+.story { font-size: 14px; line-height: 1.55; color: #bdb7a6; text-align: left; }
+.rules { text-align: left; font-size: 14px; line-height: 1.7; padding-left: 4px; list-style: none; margin: 10px 0; }
+.rules b { color: #e8c547; }
+.controls { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 14px; font-size: 13px; margin: 12px 0; color: #9a9585; }
+kbd { background: #222; border: 1px solid #555; border-bottom-width: 3px; padding: 1px 6px; border-radius: 3px; color: #eee; font-family: inherit; }
+.controls.mob { display: none; }
+body.touch .controls.desk { display: none; }
+body.touch .controls.mob { display: block; }
+button {
+  font-family: inherit; cursor: pointer; background: #1b1b17; color: #d9d4c4; border: 1px solid #555;
+  padding: 8px 14px; font-size: 14px; margin: 6px;
+}
+button:hover { border-color: #e8c547; color: #e8c547; }
+button.big {
+  font-size: 20px; font-weight: bold; letter-spacing: 3px; padding: 14px 26px; background: #c0392b; color: #fff;
+  border: 2px solid #e8c547; box-shadow: 0 4px 0 #6b1d14;
+}
+button.big:hover { background: #d84a3a; color: #fff; }
+button.big:active { transform: translateY(3px); box-shadow: 0 1px 0 #6b1d14; }
+#best { margin-top: 12px; font-size: 13px; color: #8a8575; }
+#endText { font-size: 15px; line-height: 1.5; }
+#endStats { font-size: 16px; line-height: 1.8; margin: 10px 0; color: #e8c547; }
+#endBag { font-size: 13px; color: #a9a392; line-height: 1.6; max-height: 30vh; overflow-y: auto; margin-bottom: 10px; }
+
+/* ---------- Transition ---------- */
+#trans {
+  position: fixed; inset: 0; z-index: 15; background: #000; display: flex; align-items: center; justify-content: center;
+  animation: transfade 1.8s ease-in-out forwards;
+}
+#transText { font-size: clamp(22px, 6vw, 40px); color: #e8c547; letter-spacing: 6px; text-align: center; line-height: 1.6; }
+@keyframes transfade { 0% { opacity: 0; } 20% { opacity: 1; } 75% { opacity: 1; } 100% { opacity: 0; } }
+
+/* ---------- Touch ---------- */
+#touch { position: fixed; inset: 0; z-index: 8; pointer-events: none; }
+#joyBase {
+  position: fixed; width: 130px; height: 130px; border-radius: 50%; border: 2px solid rgba(255,255,255,.25);
+  background: rgba(255,255,255,.05); left: 30px; bottom: 40px; pointer-events: none; opacity: .6;
+}
+#joyKnob {
+  position: absolute; width: 56px; height: 56px; border-radius: 50%; background: rgba(232,197,71,.45);
+  border: 2px solid rgba(232,197,71,.8); left: 37px; top: 37px;
+}
+#tbtns { position: fixed; right: 16px; bottom: 30px; display: grid; grid-template-columns: 70px 70px; gap: 12px; pointer-events: auto; }
+#tbtns button, #tTop button {
+  width: 70px; height: 70px; border-radius: 50%; font-size: 26px; margin: 0; padding: 0;
+  background: rgba(20,20,18,.6); border: 2px solid rgba(255,255,255,.3); color: #fff;
+}
+#tbtns #btnRun { font-size: 15px; font-weight: bold; grid-column: 1; grid-row: 2; }
+#tbtns #btnAct { grid-column: 2; grid-row: 1 / span 2; height: 152px; border-radius: 40px; border-color: rgba(232,197,71,.8); }
+#tbtns #btnLight { grid-column: 1; grid-row: 1; }
+#tbtns button.on { background: rgba(232,197,71,.4); border-color: #e8c547; }
+#tTop { position: fixed; right: 12px; top: 12px; display: flex; gap: 8px; pointer-events: auto; }
+#tTop button { width: 46px; height: 46px; font-size: 18px; }
+body.touch #log { bottom: 190px; }
+body.touch #prompt { bottom: 200px; font-size: 14px; }
+@media (max-width: 600px) {
+  #hud .panel { font-size: 12px; min-width: 160px; padding: 6px 9px; }
+  .batbar { width: 80px; }
+  #log div { font-size: 12px; }
+}
