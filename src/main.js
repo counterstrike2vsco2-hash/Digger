@@ -1,927 +1,912 @@
-// ДИГГЕР: БОМБАРЬ 3D — стелс от первого лица в заброшенном советском бомбоубежище.
+// РЭГДОЛЛ ПЕСОЧНИЦА 3D — физическая песочница с человечками.
 import * as THREE from 'three';
-import {
-  MW, MH, WALL, WATER, EXIT, DOWN, G, LOOT, SPOTS, ROOM_TYPES, genLevel, findPath, castRay, los,
-  isSolid, tileAt, dist, angDiff, clamp, pick, ri,
-} from './level.js';
-import { buildWorld, disposeWorld, S, WH, CH, NCX, NCY } from './world.js';
-import { Visibility } from './visibility.js';
-import { M, labelTexture, beamTexture, glowTexture, setAniso } from './textures.js';
-import { audioInit, SFX, noise as sndNoise } from './audio.js';
-import { QP, QNAME, QUALITY, GPU, AUTO, PERF, PERF_AUTO, WEAK_GPU, PRESETS, setPreset, setPerf, stdMat as qMat } from './quality.js';
+import * as CANNON from 'cannon-es';
+import { QP, QNAME, QUALITY, GPU, AUTO, PERF, PERF_AUTO, WEAK_GPU, PRESETS, setPreset, setPerf, mat, OPT, saveOpt } from './quality.js';
+import { Ragdoll, TOTAL_MASS } from './ragdoll.js';
+import { Particles, Decals, blobTexture } from './fx.js';
+import { SFX, audioInit } from './audio.js';
 
 const $ = id => document.getElementById(id);
-const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-if (isTouch) document.body.classList.add('touch');
+const rand = (a, b) => a + Math.random() * (b - a);
 
 // ============================================================
-//  Качество графики (выбирается при загрузке — см. quality.js)
+//  Рендер
 // ============================================================
-const Q = QP;
-
-// ============================================================
-//  Рендерер / сцена
-// ============================================================
-const renderer = new THREE.WebGLRenderer({ canvas: $('game'), antialias: Q.aa, powerPreference: 'high-performance', stencil: false });
+const canvas = $('game');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: QP.aa, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); // родное разрешение, без понижения
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = Q.lite ? 1.25 : 1.15;
-renderer.shadowMap.enabled = Q.shadows;
-renderer.shadowMap.type = Q.shadowSoft ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
-setAniso(renderer.capabilities.getMaxAnisotropy());
+renderer.shadowMap.enabled = QP.shadows;
+renderer.shadowMap.type = QP.soft ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
 
+const SKY = 0xa9c9e6;
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x000000);
-scene.fog = new THREE.FogExp2(0x020202, Q.far < 35 ? 0.068 : 0.06);
+scene.background = new THREE.Color(SKY);
+scene.fog = new THREE.Fog(SKY, 45, 130);
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 220);
 
-const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.05, Q.far);
-camera.rotation.order = 'YXZ';
-scene.add(camera);
-
-// --- свет (количество источников фиксировано пресетом — каждый стоит дорого на слабой видеокарте)
-const hemi = new THREE.HemisphereLight(0x3a4250, 0x0a0806, Q.lite ? 0.5 : 0.22);
+const hemi = new THREE.HemisphereLight(0xdfefff, 0x6b6250, QP.lite ? 1.6 : 1.1);
 scene.add(hemi);
-
-const flashlight = new THREE.SpotLight(0xfff0d0, 0, Q.far, 0.46, Q.fill ? 0.5 : 0.8, 1.6);
-flashlight.position.set(0.17, -0.16, -0.6); // у линзы, чтобы не засвечивать руку
-const flTarget = new THREE.Object3D(); flTarget.position.set(0.08, -0.3, -7);
-camera.add(flashlight, flTarget); flashlight.target = flTarget;
-flashlight.castShadow = Q.shadows;
-if (Q.shadows) {
-  flashlight.shadow.mapSize.set(Q.shadowMap, Q.shadowMap);
-  flashlight.shadow.camera.near = 0.2; flashlight.shadow.camera.far = 25;
-  flashlight.shadow.bias = -0.0004; flashlight.shadow.normalBias = 0.03;
+const sun = new THREE.DirectionalLight(0xfff3dd, QP.lite ? 1.7 : 2.4);
+sun.position.set(10, 18, 7);
+scene.add(sun, sun.target);
+if (QP.shadows) {
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(QP.shadowMap, QP.shadowMap);
+  const sc = sun.shadow.camera; sc.left = -20; sc.right = 20; sc.top = 20; sc.bottom = -20; sc.near = 1; sc.far = 60;
+  sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.03;
 }
+let expLight = null;
+if (QP.expLight) { expLight = new THREE.PointLight(0xffa050, 0, 22, 1.6); scene.add(expLight); }
 
-let fill = null; // отражённый свет фонаря
-if (Q.fill) { fill = new THREE.PointLight(0xffe8c8, 0, 5, 2); camera.add(fill); fill.position.set(0, 0.2, -1.6); }
-
-let moon = null; const moonTarget = new THREE.Object3D();
-if (Q.moon) { moon = new THREE.SpotLight(0x8aa4ff, 0, 14, 0.75, 0.6, 1.4); scene.add(moon, moonTarget); moon.target = moonTarget; }
-
-const lampPool = [], guardSpotPool = [];
-for (let i = 0; i < Q.lamps; i++) { const l = new THREE.PointLight(0xff4020, 0, 10, 1.7); scene.add(l); lampPool.push(l); }
-for (let i = 0; i < Q.guardSpots; i++) {
-  const l = new THREE.SpotLight(0xfff2c8, 0, 18, 0.42, 0.5, 1.5); scene.add(l); scene.add(l.target); guardSpotPool.push(l);
+// ---------- текстуры ----------
+function canvasTex(w, h, draw, repeat) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = QP.lite ? 2 : 8;
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat[0], repeat[1]); }
+  return t;
 }
+const gridTex = (base, alt, line) => canvasTex(256, 256, (g, w) => {
+  g.fillStyle = base; g.fillRect(0, 0, w, w);
+  g.fillStyle = alt; g.fillRect(0, 0, w / 2, w / 2); g.fillRect(w / 2, w / 2, w / 2, w / 2);
+  g.strokeStyle = line; g.lineWidth = 2;
+  for (let i = 0; i <= 4; i++) { g.beginPath(); g.moveTo(i * w / 4, 0); g.lineTo(i * w / 4, w); g.moveTo(0, i * w / 4); g.lineTo(w, i * w / 4); g.stroke(); }
+  g.lineWidth = 4; g.strokeRect(0, 0, w, w);
+});
+const groundTex = gridTex('#b9bcb4', '#aeb1a9', 'rgba(70,75,70,0.35)'); groundTex.repeat.set(100, 100); groundTex.wrapS = groundTex.wrapT = THREE.RepeatWrapping;
+const devTex = (rx, ry) => { const t = gridTex('#e08a3a', '#d27b2c', 'rgba(60,30,10,0.45)'); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry); return t; };
+const crateTex = canvasTex(128, 128, (g, w) => {
+  g.fillStyle = '#b07a3e'; g.fillRect(0, 0, w, w);
+  for (let i = 0; i < 6; i++) { g.fillStyle = i % 2 ? '#a06c33' : '#b8834a'; g.fillRect(0, i * w / 6, w, w / 6 - 2); }
+  g.strokeStyle = '#6b4320'; g.lineWidth = 12; g.strokeRect(6, 6, w - 12, w - 12);
+  g.beginPath(); g.moveTo(10, 10); g.lineTo(w - 10, w - 10); g.stroke();
+});
+const barrelTex = canvasTex(256, 128, (g, w, h) => {
+  g.fillStyle = '#c92a1e'; g.fillRect(0, 0, w, h);
+  g.fillStyle = '#8f1b12'; g.fillRect(0, 18, w, 6); g.fillRect(0, h - 24, w, 6);
+  g.fillStyle = '#f3c614'; g.fillRect(0, 48, w, 32);
+  g.fillStyle = '#111'; for (let x = -32; x < w; x += 24) { g.beginPath(); g.moveTo(x, 80); g.lineTo(x + 12, 80); g.lineTo(x + 44, 48); g.lineTo(x + 32, 48); g.fill(); }
+});
+const brickTex = canvasTex(256, 128, (g, w, h) => {
+  g.fillStyle = '#7a3a2a'; g.fillRect(0, 0, w, h);
+  for (let r = 0; r < 8; r++) for (let c = -1; c < 9; c++) {
+    g.fillStyle = `hsl(${10 + Math.random() * 10},${40 + Math.random() * 15}%,${33 + Math.random() * 10}%)`;
+    g.fillRect(c * 32 + (r % 2) * 16 + 2, r * 16 + 2, 28, 12);
+  }
+}, [4, 2]);
 
-// --- фонарь в руке (виден в кадре)
-const handFL = new THREE.Group();
+// ============================================================
+//  Физика
+// ============================================================
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0), allowSleep: true });
+world.broadphase = new CANNON.SAPBroadphase(world);
+world.solver.iterations = 12;
+const M_GROUND = new CANNON.Material('ground'), M_RAG = new CANNON.Material('rag'), M_OBJ = new CANNON.Material('obj');
+world.defaultContactMaterial.friction = 0.5;
+world.addContactMaterial(new CANNON.ContactMaterial(M_GROUND, M_RAG, { friction: 0.8, restitution: 0.05 }));
+world.addContactMaterial(new CANNON.ContactMaterial(M_GROUND, M_OBJ, { friction: 0.6, restitution: 0.15 }));
+world.addContactMaterial(new CANNON.ContactMaterial(M_RAG, M_RAG, { friction: 0.6, restitution: 0.05 }));
+world.addContactMaterial(new CANNON.ContactMaterial(M_RAG, M_OBJ, { friction: 0.6, restitution: 0.1 }));
+world.addContactMaterial(new CANNON.ContactMaterial(M_OBJ, M_OBJ, { friction: 0.5, restitution: 0.15 }));
+// группы столкновений: 1 — статика, 2 — человечки, 4 — предметы
+const G_STATIC = 1, G_RAG = 2, G_OBJ = 4;
+const GRAVS = [{ g: -9.82, name: 'Земля' }, { g: -1.62, name: 'Луна' }, { g: 0, name: 'Невесомость' }];
+let gravIdx = 0;
+let simTime = 0, timeScale = 1, physPaused = false;
+
+const pickables = [];      // всё, во что можно кликнуть
+const rags = [];           // человечки
+const objs = [];           // предметы
+const pins = [];           // гвозди
+const statics = [];        // статичные тела арены
+const later = [];          // отложенные действия {t, fn}
+const after = fn => later.push({ t: 0, fn });
+const delay = (t, fn) => later.push({ t, fn });
+
+const v3 = (x, y, z) => new CANNON.Vec3(x, y, z);
+const toT = (v, out = new THREE.Vector3()) => out.set(v.x, v.y, v.z);
+
+// ---------- арена ----------
+function addStatic(size, pos, rot, material, opts = {}) {
+  const body = new CANNON.Body({ mass: opts.kinematic ? 0 : 0, type: opts.kinematic ? CANNON.Body.KINEMATIC : CANNON.Body.STATIC, material: M_GROUND, collisionFilterGroup: G_STATIC });
+  body.addShape(new CANNON.Box(v3(size[0] / 2, size[1] / 2, size[2] / 2)));
+  body.position.set(pos[0], pos[1], pos[2]);
+  if (rot) body.quaternion.setFromEuler(rot[0], rot[1], rot[2]);
+  world.addBody(body);
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), material);
+  mesh.position.copy(body.position); mesh.quaternion.copy(body.quaternion);
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  mesh.userData.static = true; mesh.userData.body = body; body.mesh = mesh;
+  scene.add(mesh); pickables.push(mesh); statics.push(body);
+  return body;
+}
 {
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.2, 12), M.darkMetal());
-  body.rotation.x = Math.PI / 2; handFL.add(body);
-  const head = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.024, 0.06, 14), M.darkMetal());
-  head.rotation.x = Math.PI / 2; head.position.z = -0.12; handFL.add(head);
-  handFL.lens = qMat({ color: 0x222222, emissive: 0xfff2c0, emissiveIntensity: 0 });
-  const lens = new THREE.Mesh(new THREE.CircleGeometry(0.03, 14), handFL.lens); lens.position.z = -0.151; lens.rotation.y = Math.PI; handFL.add(lens);
-  const glove = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.09), qMat({ color: 0x1a1a16, roughness: 1 }));
-  glove.position.set(0.01, -0.02, 0.03); handFL.add(glove);
-  handFL.scale.setScalar(0.75);
-  handFL.position.set(0.17, -0.17, -0.42);
-  camera.add(handFL);
-}
+  const ground = new CANNON.Body({ mass: 0, material: M_GROUND, collisionFilterGroup: G_STATIC });
+  ground.addShape(new CANNON.Plane());
+  ground.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+  world.addBody(ground);
+  const gm = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), mat({ map: groundTex, roughness: 0.95 }));
+  gm.rotation.x = -Math.PI / 2; gm.receiveShadow = true; gm.userData.static = true; gm.userData.ground = true;
+  scene.add(gm); pickables.push(gm);
 
-// --- пыль в луче (только на средней/высокой)
-let dust = null;
-if (Q.dust) {
-  const n = Q.dust, pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) { pos[i * 3] = (Math.random() - .5) * 12; pos[i * 3 + 1] = Math.random() * WH; pos[i * 3 + 2] = (Math.random() - .5) * 12; }
-  const gm = new THREE.BufferGeometry();
-  gm.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  gm.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  dust = new THREE.Points(gm, new THREE.PointsMaterial({ size: 0.025, map: glowTexture(), vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
-  dust.frustumCulled = false;
-  scene.add(dust);
+  const dev = mat({ map: devTex(2, 3), roughness: 0.8 });
+  // пандус
+  addStatic([6, 0.4, 11], [16, 1.55, 0], [-0.29, 0, 0], dev);
+  // вышка с лестницей
+  const devP = mat({ map: devTex(2, 2), roughness: 0.8 });
+  addStatic([6, 0.5, 6], [-16, 6, -12], null, devP);
+  const pil = mat({ color: 0x6d6d6d, roughness: 0.9 }, 'pillar');
+  for (const [x, z] of [[-18.7, -14.7], [-13.3, -14.7], [-18.7, -9.3], [-13.3, -9.3]]) addStatic([0.5, 5.75, 0.5], [x, 2.875, z], null, pil);
+  const step = mat({ color: 0x8d8d86, roughness: 0.9 }, 'step');
+  for (let i = 0; i < 12; i++) { const h = 6 - i * 0.5; addStatic([2, h, 0.6], [-14, h / 2, -8.7 + i * 0.6], null, step); }
+  // кирпичная стена
+  addStatic([10, 3, 0.6], [0, 1.5, 14], null, mat({ map: brickTex, roughness: 0.95 }));
+  // невысокие бортики-препятствия
+  addStatic([0.6, 0.8, 6], [-8, 0.4, 3], null, pil);
 }
-
-// --- разрешение всегда родное (без понижения), считаем только FPS
-const FPSC = { frames: 0, acc: 0 };
-function applyScale() { renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); }
-function updateFPS(dt) {
-  FPSC.frames++; FPSC.acc += dt;
-  if (FPSC.acc < 0.5) return;
-  const fps = FPSC.frames / FPSC.acc; FPSC.frames = 0; FPSC.acc = 0;
-  const el = $('fps'), c = renderer.domElement;
-  if (el) el.textContent = `${Math.round(fps)} FPS · ${c.width}×${c.height}${PERF ? ' · ⚡' : ''}`;
+// вращающаяся «мясорубка»
+let spinner = null;
+{
+  const postM = mat({ color: 0x444444, roughness: 0.6 }, 'post');
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.4, 1.4, 12), postM); post.position.set(12, 0.7, -16); post.castShadow = true; scene.add(post);
+  const pb = new CANNON.Body({ mass: 0, material: M_GROUND, collisionFilterGroup: G_STATIC }); pb.addShape(new CANNON.Cylinder(0.3, 0.4, 1.4, 10)); pb.position.set(12, 0.7, -16); world.addBody(pb);
+  post.userData.static = true; pickables.push(post);
+  spinner = addStatic([11, 0.45, 0.45], [12, 1.15, -16], null, mat({ color: 0xd9c31f, roughness: 0.5 }, 'spin'), { kinematic: true });
+  spinner.angularVelocity.set(0, 2.2, 0);
 }
-
-function resize() {
-  renderer.setSize(innerWidth, innerHeight, false);
-  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
-}
-window.addEventListener('resize', () => { applyScale(); resize(); });
-applyScale(); resize();
 
 // ============================================================
-//  Модели: предметы, охрана, крысы
+//  Эффекты
 // ============================================================
-const box = (w, h, d, m) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.castShadow = true; o.receiveShadow = true; return o; };
-const cyl = (r1, r2, h, m, seg = 14) => { const o = new THREE.Mesh(new THREE.CylinderGeometry(r1, r2, h, seg), m); o.castShadow = true; o.receiveShadow = true; return o; };
-const sph = (r, m) => { const o = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), m); o.castShadow = true; return o; };
-const matCache = {};
-const stdMat = (color, rough = 0.7, metal = 0, extra = {}) => { const k = [color, rough, metal, extra.emissive || 0].join(); return matCache[k] || (matCache[k] = qMat(Object.assign({ color, roughness: rough, metalness: metal }, extra))); };
-const labelMat = (t, bg, fg) => matCache['l' + t] || (matCache['l' + t] = qMat({ map: labelTexture(t, bg, fg), roughness: 0.7 }));
+const fxAdd = new Particles(scene, Math.round(QP.particles * 0.6), true);
+const fxNorm = new Particles(scene, QP.particles, false);
+const decals = new Decals(scene, QP.lite ? 220 : 400);
+fxNorm.onGround = (x, z) => { if (Math.random() < 0.35) decals.add(x, 0, z, rand(0.08, 0.22), '#5c0c0c'); };
 
-function makeItem(type) {
+function bloodBurst(p, dir, n, speed = 4) {
+  if (OPT.blood) {
+    for (let i = 0; i < n; i++) {
+      const s = speed * rand(0.3, 1.1);
+      fxNorm.spawn(p.x, p.y, p.z, (dir ? dir.x * s : 0) + rand(-2, 2), (dir ? dir.y * s : 0) + rand(0, 3), (dir ? dir.z * s : 0) + rand(-2, 2), rand(0.6, 1.4), rand(0.05, 0.11), 0.55, 0.03, 0.03, 1, 9.8, 0.4, 0, 1);
+    }
+    SFX.splat();
+  } else {
+    for (let i = 0; i < Math.ceil(n / 2); i++) fxAdd.spawn(p.x, p.y, p.z, rand(-3, 3), rand(-1, 3), rand(-3, 3), rand(0.2, 0.4), rand(0.06, 0.12), 1, 0.9, 0.5, 1, 6, 2, 0, 2);
+  }
+}
+function dust(p, n = 6) {
+  for (let i = 0; i < n; i++) fxNorm.spawn(p.x, p.y + 0.05, p.z, rand(-1.2, 1.2), rand(0.3, 1.5), rand(-1.2, 1.2), rand(0.4, 0.9), rand(0.12, 0.25), 0.55, 0.52, 0.47, 0.6, 1.5, 2, 0.6, 2);
+}
+let shake = 0;
+function explosionFX(p, R) {
+  const k = QP.lite ? 0.6 : 1;
+  for (let i = 0; i < 6; i++) fxAdd.spawn(p.x, p.y, p.z, 0, 0, 0, 0.18, R * rand(0.8, 1.2), 1, 0.95, 0.75, 1, 0, 0, R * 2, 2);
+  for (let i = 0; i < 34 * k; i++) { const a = rand(0, 6.28), e = rand(-0.2, 1.2), s = rand(2, 7); fxAdd.spawn(p.x, p.y + 0.3, p.z, Math.cos(a) * Math.cos(e) * s, Math.sin(e) * s + 1, Math.sin(a) * Math.cos(e) * s, rand(0.35, 0.8), rand(0.6, 1.3), 1, rand(0.4, 0.65), 0.1, 0.9, -1, 2.5, 1.2, 2); }
+  for (let i = 0; i < 26 * k; i++) { const a = rand(0, 6.28), s = rand(0.5, 3); fxNorm.spawn(p.x + rand(-1, 1), p.y + rand(0, 1.5), p.z + rand(-1, 1), Math.cos(a) * s, rand(1, 3.5), Math.sin(a) * s, rand(1.6, 3.2), rand(0.9, 1.6), 0.18, 0.17, 0.16, 0.55, -0.4, 1.2, 1.4, 2); }
+  for (let i = 0; i < 40 * k; i++) { const a = rand(0, 6.28), e = rand(0, 1.3), s = rand(6, 16); fxAdd.spawn(p.x, p.y + 0.2, p.z, Math.cos(a) * Math.cos(e) * s, Math.sin(e) * s, Math.sin(a) * Math.cos(e) * s, rand(0.4, 1.0), rand(0.05, 0.1), 1, 0.75, 0.3, 1, 9.8, 0.5, 0); }
+  if (p.y < 1.6) decals.add(p.x, Math.max(0, p.y - 1.2) * 0, p.z, R * 0.32, '#151311');
+  if (expLight) { expLight.position.set(p.x, p.y + 1, p.z); expLight.intensity = 90; }
+  const dc = camera.position.distanceTo(p);
+  shake = Math.max(shake, Math.max(0, 1 - dc / 45) * 0.8);
+  SFX.explode(Math.max(0.15, 1 - dc / 70));
+}
+
+// ============================================================
+//  Человечки
+// ============================================================
+const blobGeo = new THREE.PlaneGeometry(1, 1); blobGeo.rotateX(-Math.PI / 2);
+const blobMat = new THREE.MeshBasicMaterial({ map: blobTexture(), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 });
+const env = {
+  world, scene, material: M_RAG,
+  onImpact(rd, part, v, other) {
+    if (v > 2.5) SFX.thud(v);
+    if (v < 6) return;
+    if (other && other.isRocket) return;
+    const died = rd.hurt((v - 6) * 5, part, Math.min(5, (v - 5) * 0.6));
+    if (died) SFX.die(); else if (rd.alive && v > 7) SFX.ouch();
+    if (v > 9) { const b = rd.by[part].body; bloodBurst(toT(b.position), null, Math.min(14, Math.round(v - 6))); }
+    if (v > 24 && OPT.dismember && part !== 'pelvis' && part !== 'chest' && Math.random() < 0.5) after(() => detachPart(rd, part));
+  },
+};
+function spawnRagdoll(p, faceTo) {
+  if (rags.length >= QP.maxRagdolls) { toast(`Лимит человечков: ${QP.maxRagdolls}. Удали лишних (ластик или Del)`); return null; }
+  const yaw = faceTo ? Math.atan2(faceTo.x - p.x, faceTo.z - p.z) : rand(0, 6.28);
+  const rd = new Ragdoll(env, p, yaw);
+  for (const part of rd.parts) { part.body.collisionFilterGroup = G_RAG; pickables.push(part.mesh); }
+  if (QP.blobs) { rd.blob = new THREE.Mesh(blobGeo, blobMat.clone()); scene.add(rd.blob); }
+  rags.push(rd);
+  return rd;
+}
+function removeRagdoll(rd) {
+  for (const pin of pins.slice()) if (pin.body.rd === rd) removePin(pin);
+  if (grab && grab.body.rd === rd) releaseGrab();
+  for (const part of rd.parts) { const i = pickables.indexOf(part.mesh); if (i >= 0) pickables.splice(i, 1); }
+  if (rd.blob) { scene.remove(rd.blob); rd.blob.material.dispose(); }
+  rd.remove();
+  rags.splice(rags.indexOf(rd), 1);
+}
+function detachPart(rd, part) {
+  if (rd.removed || !rd.joints[part]) return;
+  const wasAlive = rd.alive;
+  const p = rd.detach(part);
+  if (!p) return;
+  bloodBurst(p, null, 18, 5);
+  if (wasAlive && !rd.alive) SFX.die(); else SFX.ouch();
+}
+
+// ============================================================
+//  Предметы
+// ============================================================
+const crateGeo = new THREE.BoxGeometry(1, 1, 1);
+const barrelGeo = new THREE.CylinderGeometry(0.4, 0.4, 1.1, 16);
+const bombGeo = new THREE.SphereGeometry(0.3, 16, 12);
+const crateMat = mat({ map: crateTex, roughness: 0.85 });
+const barrelMat = [mat({ map: barrelTex, roughness: 0.5, metalness: 0.3 }), mat({ color: 0x9c2018, roughness: 0.5, metalness: 0.3 }, 'barrelTop'), mat({ color: 0x9c2018, roughness: 0.5, metalness: 0.3 }, 'barrelTop')];
+const bombMat = mat({ color: 0x1b1b1b, roughness: 0.4, metalness: 0.5 }, 'bomb');
+
+function addObj(kind, body, mesh, extra = {}) {
+  body.collisionFilterGroup = body.type === CANNON.Body.STATIC ? G_STATIC : G_OBJ;
+  body.sleepSpeedLimit = 0.2; body.sleepTimeLimit = 1;
+  body.interpolatedPosition.copy(body.position); body.interpolatedQuaternion.copy(body.quaternion);
+  world.addBody(body); scene.add(mesh);
+  mesh.castShadow = true; mesh.receiveShadow = !QP.lite;
+  const o = Object.assign({ kind, body, mesh }, extra);
+  body.obj = o; mesh.userData.body = body; mesh.userData.obj = o; body.mesh = mesh;
+  objs.push(o); pickables.push(mesh);
+  return o;
+}
+function removeObj(o) {
+  if (o.removed) return;
+  o.removed = true;
+  for (const pin of pins.slice()) if (pin.body === o.body) removePin(pin);
+  if (grab && grab.body === o.body) releaseGrab();
+  world.removeBody(o.body); scene.remove(o.mesh);
+  const i = objs.indexOf(o); if (i >= 0) objs.splice(i, 1);
+  const k = pickables.indexOf(o.mesh); if (k >= 0) pickables.splice(k, 1);
+}
+const MAX_OBJS = QP.lite ? 120 : 200;
+function objLimit() { if (objs.length >= MAX_OBJS) { toast(`Лимит предметов: ${MAX_OBJS}. Очисти лишнее (Del)`); return true; } return false; }
+
+function spawnCrate(p, s = 1) {
+  if (objLimit()) return;
+  const body = new CANNON.Body({ mass: 18 * s * s * s, material: M_OBJ });
+  body.addShape(new CANNON.Box(v3(s / 2, s / 2, s / 2)));
+  body.position.set(p.x, p.y + s / 2 + 0.02, p.z);
+  body.quaternion.setFromEuler(0, rand(0, 6.28), 0);
+  const mesh = new THREE.Mesh(crateGeo, crateMat); mesh.scale.setScalar(s);
+  const o = addObj('crate', body, mesh);
+  body.addEventListener('collide', e => { const v = Math.abs(e.contact.getImpactVelocityAlongNormal()); if (v > 2) SFX.crate(v); });
+  return o;
+}
+function spawnBarrel(p) {
+  if (objLimit()) return;
+  const body = new CANNON.Body({ mass: 15, material: M_OBJ });
+  body.addShape(new CANNON.Cylinder(0.4, 0.4, 1.1, 12));
+  body.position.set(p.x, p.y + 0.57, p.z);
+  const mesh = new THREE.Mesh(barrelGeo, barrelMat);
+  const o = addObj('barrel', body, mesh, { explosive: true });
+  body.addEventListener('collide', e => {
+    const v = Math.abs(e.contact.getImpactVelocityAlongNormal());
+    if (v > 2) SFX.metal(v);
+    if (v > 13) after(() => detonate(o));
+  });
+  return o;
+}
+function spawnBomb(p) {
+  if (objLimit()) return;
+  const body = new CANNON.Body({ mass: 8, material: M_OBJ, angularDamping: 0.4 });
+  body.addShape(new CANNON.Sphere(0.3));
+  body.position.set(p.x, p.y + 0.32, p.z);
+  const mesh = new THREE.Mesh(bombGeo, bombMat);
+  const led = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 6), new THREE.MeshBasicMaterial({ color: 0x550000 }));
+  led.position.set(0, 0.3, 0); mesh.add(led);
+  const fuse = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.18, 6), mat({ color: 0x8b6a3a }, 'fuse'));
+  fuse.position.set(0.08, 0.32, 0); fuse.rotation.z = -0.5; mesh.add(fuse);
+  return addObj('bomb', body, mesh, { explosive: true, fuse: 3, led, power: 27, R: 7 });
+}
+function spawnTrampoline(p) {
+  if (objLimit()) return;
+  const body = new CANNON.Body({ mass: 0, type: CANNON.Body.STATIC, material: M_GROUND });
+  body.addShape(new CANNON.Box(v3(1.5, 0.15, 1.5)));
+  body.position.set(p.x, p.y + 0.15, p.z);
+  const mesh = makeTrampolineMesh();
+  const o = addObj('tramp', body, mesh);
+  body.addEventListener('collide', e => after(() => boing(e.body)));
+  return o;
+}
+function makeTrampolineMesh() {
   const g = new THREE.Group();
-  switch (type) {
-    case 'battery': {
-      const lm = labelMat('КРОНА', '#d9b72c', '#111');
-      for (let k = 0; k < 2; k++) { const b = box(0.1, 0.17, 0.06, [stdMat(0x222222), stdMat(0x222222), stdMat(0x999999, 0.3, 0.8), stdMat(0x222222), lm, lm]); b.position.set(k * 0.12 - 0.06, 0.085, 0); b.rotation.y = k * 0.3; g.add(b); }
-      break;
-    }
-    case 'gasmask': {
-      const rub = stdMat(0x55614f, 0.85);
-      const face = sph(0.15, rub); face.scale.set(1, 1.15, 0.8); face.position.y = 0.13; g.add(face);
-      for (const x of [-0.06, 0.06]) { const e = cyl(0.04, 0.04, 0.04, stdMat(0x9fc4cc, 0.05, 0.3, { emissive: 0x112222 }), 16); e.rotation.x = Math.PI / 2; e.position.set(x, 0.17, 0.11); g.add(e); }
-      const fl = cyl(0.06, 0.06, 0.14, stdMat(0x2f4a35, 0.5, 0.4)); fl.position.set(0, 0.06, 0.16); fl.rotation.x = 1.2; g.add(fl);
-      g.rotation.x = -0.6;
-      break;
-    }
-    case 'dosimeter': {
-      const dial = labelMat('ДП-5В', '#d9d4c0', '#8a1c14');
-      const ol = stdMat(0x5d6a42, 0.6, 0.2);
-      const db = box(0.3, 0.16, 0.18, [ol, ol, dial, ol, ol, ol]); db.position.y = 0.08; g.add(db);
-      const h = box(0.2, 0.03, 0.03, M.black()); h.position.y = 0.19; g.add(h);
-      break;
-    }
-    case 'sign': {
-      const s = box(0.7, 0.35, 0.02, [M.greyMetal(), M.greyMetal(), M.greyMetal(), M.greyMetal(), labelMat('УБЕЖИЩЕ', '#1f5a2e', '#f0f0e0'), M.greyMetal()]);
-      s.position.set(0, 0.17, 0); s.rotation.x = -0.35; g.add(s);
-      break;
-    }
-    case 'journal': {
-      const cov = labelMat('ЖУРНАЛ', '#6b3a22', '#e0d0a0');
-      const j = box(0.22, 0.04, 0.3, [stdMat(0x6b3a22), stdMat(0x6b3a22), cov, stdMat(0xd8d0b0), stdMat(0x6b3a22), stdMat(0x6b3a22)]);
-      j.position.y = 0.02; g.add(j);
-      break;
-    }
-    case 'filter': {
-      const f = cyl(0.1, 0.1, 0.22, M.filterGreen(), 18); f.position.y = 0.11; g.add(f);
-      const c = cyl(0.04, 0.04, 0.05, M.steel()); c.position.y = 0.245; g.add(c);
-      break;
-    }
-    case 'aid': {
-      const lm = labelMat('АИ-2', '#e07a1f', '#fff');
-      const a = box(0.2, 0.06, 0.14, [stdMat(0xe07a1f, 0.5), stdMat(0xe07a1f, 0.5), lm, stdMat(0xe07a1f, 0.5), stdMat(0xe07a1f, 0.5), stdMat(0xe07a1f, 0.5)]);
-      a.position.y = 0.03; g.add(a);
-      break;
-    }
-    case 'radio': {
-      const ol = M.olive();
-      const r = box(0.32, 0.36, 0.16, ol); r.position.y = 0.18; g.add(r);
-      const ant = cyl(0.006, 0.01, 0.7, M.black(), 6); ant.position.set(0.12, 0.7, 0); ant.rotation.z = -0.15; g.add(ant);
-      for (const x of [-0.08, 0.04]) { const k = cyl(0.025, 0.025, 0.03, M.black()); k.rotation.x = Math.PI / 2; k.position.set(x, 0.26, 0.09); g.add(k); }
-      break;
-    }
-    case 'ozk': {
-      const gr = stdMat(0x4b6b3a, 0.6);
-      const b1 = box(0.45, 0.12, 0.32, gr); b1.position.y = 0.06; g.add(b1);
-      const b2 = box(0.4, 0.1, 0.28, gr); b2.position.y = 0.17; b2.rotation.y = 0.2; g.add(b2);
-      break;
-    }
-  }
-  g.traverse(o => { if (o.isMesh) o.castShadow = true; });
-  const glint = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: 0xfff4c0, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0 }));
-  glint.scale.set(0.35, 0.35, 1); glint.position.y = 0.35; g.add(glint); g.userData.glint = glint;
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(3, 0.25, 3), mat({ color: 0x2a2a2a, roughness: 0.6 }, 'trampFrame'));
+  const top = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.04, 2.6), mat({ color: 0x2f7fe0, roughness: 0.5 }, 'trampTop'));
+  top.position.y = 0.13; frame.castShadow = true; frame.receiveShadow = true; top.receiveShadow = true;
+  g.add(frame, top);
+  // Group не Mesh: для пиков добавим невидимый бокс
+  const hit = new THREE.Mesh(new THREE.BoxGeometry(3, 0.3, 3), new THREE.MeshBasicMaterial({ visible: false }));
+  g.add(hit);
   return g;
 }
-
-function makeGuard() {
-  const g = new THREE.Group(); // смотрит вдоль +X
-  const cloth = M.guardCloth(), black = M.black(), skin = M.skin();
-  const legL = new THREE.Group(), legR = new THREE.Group();
-  for (const [leg, z] of [[legL, -0.11], [legR, 0.11]]) {
-    const l = box(0.14, 0.82, 0.15, cloth); l.position.y = -0.41; leg.add(l);
-    const boot = box(0.26, 0.1, 0.15, black); boot.position.set(0.05, -0.83, 0); leg.add(boot);
-    leg.position.set(0, 0.88, z); g.add(leg);
-  }
-  const torso = box(0.28, 0.62, 0.48, cloth); torso.position.y = 1.2; g.add(torso);
-  const back = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.2), qMat({ map: labelTexture('ОХРАНА', '#1b2433', '#e8c547', 256, 128, 'bold 52px sans-serif'), roughness: 0.9 }));
-  back.position.set(-0.141, 1.32, 0); back.rotation.y = -Math.PI / 2; g.add(back);
-  const belt = box(0.3, 0.06, 0.5, black); belt.position.y = 0.92; g.add(belt);
-  const head = sph(0.13, skin); head.position.y = 1.66; g.add(head);
-  const cap = cyl(0.14, 0.14, 0.08, black, 16); cap.position.y = 1.76; g.add(cap);
-  const visor = box(0.12, 0.02, 0.22, black); visor.position.set(0.12, 1.73, 0); g.add(visor);
-  const armL = new THREE.Group(); const al = box(0.12, 0.6, 0.12, cloth); al.position.y = -0.3; armL.add(al); armL.position.set(0, 1.48, -0.3); g.add(armL);
-  const armR = new THREE.Group(); const ar = box(0.12, 0.55, 0.12, cloth); ar.position.y = -0.27; armR.add(ar);
-  const fl = cyl(0.03, 0.03, 0.22, M.darkMetal()); fl.position.set(0, -0.58, 0); armR.add(fl);
-  armR.position.set(0, 1.48, 0.3); armR.rotation.z = Math.PI / 2 - 0.15; g.add(armR);
-  // видимый луч
-  const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 0.04, 7, Q.beamSeg, 1, true),
-    new THREE.MeshBasicMaterial({ map: beamTexture(), color: 0xfff0c0, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
-  beam.rotation.z = -Math.PI / 2; beam.position.set(0.55 + 3.5, 1.4, 0.3);
-  g.add(beam);
-  const lensGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture(), color: 0xfff0c0, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
-  lensGlow.scale.set(0.5, 0.5, 1); lensGlow.position.set(0.6, 1.45, 0.3); g.add(lensGlow);
-  g.userData = { legL, legR, armL, beam, lensGlow, head };
-  return g;
+function boing(b) {
+  if (!b || b.type !== CANNON.Body.DYNAMIC) return;
+  const targets = b.rd ? b.rd.bodies : [b];
+  const vUp = gravIdx === 2 ? 6 : 14;
+  for (const t of targets) { t.wakeUp(); if (t.velocity.y < vUp) t.velocity.y = vUp; }
+  if (b.rd) b.rd.stun = Math.max(b.rd.stun, 1.5);
+  SFX.boing();
+}
+function spawnRocket(from, dir) {
+  if (objLimit()) return;
+  const body = new CANNON.Body({ mass: 3, material: M_OBJ, linearDamping: 0 });
+  body.addShape(new CANNON.Sphere(0.15));
+  body.position.set(from.x, from.y, from.z);
+  body.velocity.set(dir.x * 38, dir.y * 38, dir.z * 38);
+  body.isRocket = true; body.allowSleep = false;
+  const mesh = new THREE.Group();
+  const tube = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.6, 8), mat({ color: 0x4d5a3a }, 'rocket')); tube.rotation.x = Math.PI / 2;
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 8), mat({ color: 0xc23a2a }, 'nose')); nose.rotation.x = Math.PI / 2; nose.position.z = 0.4;
+  mesh.add(tube, nose);
+  const o = addObj('rocket', body, mesh, { explosive: true, life: 5, power: 24, R: 6.5 });
+  body.collisionFilterMask = ~0;
+  body.addEventListener('collide', () => after(() => detonate(o)));
+  SFX.rocket();
+  return o;
 }
 
-function makeRat() {
-  const g = new THREE.Group();
-  const body = sph(0.08, M.rat()); body.scale.set(1.6, 0.8, 0.9); body.position.y = 0.07; g.add(body);
-  const head = sph(0.05, M.rat()); head.scale.set(1.4, 0.9, 0.9); head.position.set(0.14, 0.07, 0); g.add(head);
-  const tail = cyl(0.008, 0.004, 0.26, M.ratTail(), 5); tail.rotation.z = Math.PI / 2; tail.position.set(-0.24, 0.04, 0); g.add(tail);
-  for (const z of [-0.025, 0.025]) { const e = sph(0.008, stdMat(0x000000, 0.1, 0, { emissive: 0x330000 })); e.position.set(0.2, 0.09, z); g.add(e); }
-  return g;
+// ---------- взрыв ----------
+function detonate(o) {
+  if (o.removed) return;
+  const p = toT(o.body.position);
+  removeObj(o);
+  explode(p, o.R || 6, o.power || 22);
+}
+function explode(p, R, power) {
+  explosionFX(p, R);
+  const c = new CANNON.Vec3(p.x, p.y, p.z), d = new CANNON.Vec3();
+  const hitRags = new Map();
+  for (const b of world.bodies) {
+    if (b.type !== CANNON.Body.DYNAMIC) continue;
+    b.position.vsub(c, d);
+    const dist = d.length();
+    if (dist > R) continue;
+    const f = 1 - dist / R;
+    d.y += 0.6 + dist * 0.15; d.normalize();
+    const dv = power * f * rand(0.85, 1.15);
+    b.wakeUp();
+    b.applyImpulse(new CANNON.Vec3(d.x * dv * b.mass, d.y * dv * b.mass, d.z * dv * b.mass));
+    b.angularVelocity.x += rand(-1, 1) * f * 6; b.angularVelocity.z += rand(-1, 1) * f * 6;
+    if (b.rd) { const h = hitRags.get(b.rd) || { f: 0, parts: [] }; h.f = Math.max(h.f, f); h.parts.push([b.part, f]); hitRags.set(b.rd, h); }
+    else if (b.obj && b.obj.explosive && !b.obj.removed && b.obj.kind !== 'rocket') { const o = b.obj; delay(rand(0.08, 0.25), () => detonate(o)); }
+  }
+  for (const [rd, h] of hitRags) {
+    const wasAlive = rd.alive;
+    rd.hurt(110 * h.f, 'chest', 6);
+    if (OPT.dismember) for (const [part, f] of h.parts) if (part !== 'pelvis' && f > 0.45 && Math.random() < f * 0.8) detachPart(rd, part);
+    bloodBurst(toT(rd.pelvis.position), null, Math.round(10 * h.f));
+    if (wasAlive && !rd.alive) SFX.die();
+  }
+}
+
+// ---------- гвозди ----------
+const nailGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.25, 6);
+const nailMat = new THREE.MeshBasicMaterial({ color: 0xd0d0d0 });
+function addPin(body, point) {
+  const anchor = new CANNON.Body({ mass: 0, type: CANNON.Body.STATIC, collisionFilterGroup: 0, collisionFilterMask: 0 });
+  anchor.position.set(point.x, point.y, point.z);
+  world.addBody(anchor);
+  const local = new CANNON.Vec3(); body.pointToLocalFrame(new CANNON.Vec3(point.x, point.y, point.z), local);
+  const c = new CANNON.PointToPointConstraint(body, local, anchor, new CANNON.Vec3(0, 0, 0), 4000);
+  world.addConstraint(c);
+  const mesh = new THREE.Mesh(nailGeo, nailMat); mesh.position.copy(point);
+  scene.add(mesh); pickables.push(mesh);
+  const pin = { body, anchor, c, mesh };
+  mesh.userData.pin = pin;
+  if (body.rd) body.rd.pinned++;
+  pins.push(pin);
+  SFX.pin();
+}
+function removePin(pin) {
+  world.removeConstraint(pin.c); world.removeBody(pin.anchor); scene.remove(pin.mesh);
+  const i = pickables.indexOf(pin.mesh); if (i >= 0) pickables.splice(i, 1);
+  if (pin.body.rd) pin.body.rd.pinned--;
+  pins.splice(pins.indexOf(pin), 1);
 }
 
 // ============================================================
-//  Состояние
+//  Инструменты
 // ============================================================
-let world = null;
-// --- отсечение невидимого: рисуем только куски карты, которые игрок реально может увидеть
-const vis = new Visibility(MW, MH, CH);
-const chunkOn = new Uint8Array(NCX * NCY).fill(1), detailOn = new Uint8Array(NCX * NCY).fill(1);
-const DETAIL_DIST = Q.lite ? 24 : 34;              // дальше этого мелочи (реквизит, мусор, трубы) не рисуются
-const opaqueTile = (x, y) => G.map[y * MW + x] === WALL;
-const visFwd = new THREE.Vector3();
-function updateVisibility() {
-  if (!world || !world.chunks) return;
-  camera.getWorldDirection(visFwd);
-  let fx = visFwd.x, fz = visFwd.z, l = Math.hypot(fx, fz);
-  if (l < 0.2) { fx = -Math.sin(P.yaw); fz = -Math.cos(P.yaw); l = 1; }
-  fx /= l; fz /= l;
-  const halfH = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * camera.aspect);
-  vis.compute(camera.position.x / S, camera.position.z / S, fx, fz, Math.min(Math.PI, halfH + 0.3), camera.far / S + 1, opaqueTile);
-  const cs = CH * S, cxp = camera.position.x, czp = camera.position.z;
-  for (let ci = 0; ci < world.chunks.length; ci++) {
-    const on = vis.chunkVisible(ci) ? 1 : 0;
-    let det = on;
-    if (on) { // расстояние от камеры до ближайшей точки куска
-      const x0 = (ci % NCX) * cs, z0 = Math.floor(ci / NCX) * cs;
-      const dx = Math.max(x0 - cxp, 0, cxp - x0 - cs), dz = Math.max(z0 - czp, 0, czp - z0 - cs);
-      det = Math.hypot(dx, dz) < DETAIL_DIST ? 1 : 0;
+const TOOLS = [
+  { id: 'hand', icon: '✋', name: 'Рука', hint: 'ЛКМ — схватить и тащить, отпусти — бросок. Колесо — ближе/дальше' },
+  { id: 'human', icon: '🧍', name: 'Человечек', hint: 'ЛКМ — поставить человечка' },
+  { id: 'crate', icon: '📦', name: 'Ящик', hint: 'ЛКМ — поставить ящик (Shift — большой)' },
+  { id: 'barrel', icon: '🛢️', name: 'Бочка', hint: 'Взрывается от удара, выстрела или взрыва рядом' },
+  { id: 'bomb', icon: '💣', name: 'Бомба', hint: 'Взрыв через 3 секунды' },
+  { id: 'gun', icon: '🔫', name: 'Пистолет', hint: 'ЛКМ — выстрел (держи — очередь)' },
+  { id: 'rocket', icon: '🚀', name: 'Базука', hint: 'ЛКМ — ракета, взрывается при ударе' },
+  { id: 'tramp', icon: '🟦', name: 'Батут', hint: 'ЛКМ — поставить батут' },
+  { id: 'pin', icon: '📌', name: 'Гвоздь', hint: 'ЛКМ — прибить часть тела или предмет к месту' },
+  { id: 'erase', icon: '🧽', name: 'Ластик', hint: 'ЛКМ — удалить человечка, предмет или гвоздь' },
+];
+let tool = 'hand';
+function setTool(id) {
+  tool = id;
+  document.querySelectorAll('#hotbar .slot').forEach(s => s.classList.toggle('on', s.dataset.tool === id));
+  const t = TOOLS.find(t => t.id === id);
+  $('toolHint').textContent = `${t.icon} ${t.name}: ${t.hint}`;
+  canvas.style.cursor = id === 'hand' ? 'grab' : 'crosshair';
+}
+
+// ---------- лучи из мыши ----------
+const ray = new THREE.Raycaster();
+const mouse = new THREE.Vector2(), mousePx = { x: 0, y: 0 };
+function pick() {
+  ray.setFromCamera(mouse, camera);
+  const hits = ray.intersectObjects(pickables, true);
+  for (const h of hits) {
+    let o = h.object;
+    while (o && !o.userData.body && !o.userData.static && !o.userData.pin) o = o.parent;
+    if (!o) continue;
+    const n = h.face ? h.face.normal.clone().transformDirection(h.object.matrixWorld) : new THREE.Vector3(0, 1, 0);
+    return { point: h.point, normal: n, mesh: o, body: o.userData.body, obj: o.userData.obj, pin: o.userData.pin, ground: !!o.userData.ground, static: !!o.userData.static, dist: h.distance };
+  }
+  return null;
+}
+// точка для установки предмета: верхняя поверхность под курсором
+function placePoint() {
+  const h = pick();
+  if (!h) return null;
+  const p = h.point.clone();
+  if (h.normal.y < 0.5) p.addScaledVector(h.normal, 0.6); // кликнули в стену — ставим рядом
+  return p;
+}
+
+// ---------- рука ----------
+let grab = null;
+function startGrab(h) {
+  const b = h.body;
+  if (!b || b.type !== CANNON.Body.DYNAMIC) return;
+  const anchor = new CANNON.Body({ mass: 0, type: CANNON.Body.STATIC, collisionFilterGroup: 0, collisionFilterMask: 0 });
+  anchor.position.set(h.point.x, h.point.y, h.point.z);
+  world.addBody(anchor);
+  const local = new CANNON.Vec3(); b.pointToLocalFrame(new CANNON.Vec3(h.point.x, h.point.y, h.point.z), local);
+  const c = new CANNON.PointToPointConstraint(b, local, anchor, new CANNON.Vec3(0, 0, 0), b.rd ? 2600 : 1800);
+  world.addConstraint(c);
+  b.wakeUp();
+  grab = { body: b, anchor, c, dist: h.dist, damp: b.linearDamping };
+  b.linearDamping = 0.4;
+  if (b.rd) { b.rd.grabbed++; for (const x of b.rd.bodies) x.wakeUp(); }
+  canvas.style.cursor = 'grabbing';
+}
+function updateGrab() {
+  if (!grab) return;
+  ray.setFromCamera(mouse, camera);
+  const p = ray.ray.origin.clone().addScaledVector(ray.ray.direction, grab.dist);
+  p.y = Math.max(0.15, p.y);
+  grab.anchor.position.set(p.x, p.y, p.z);
+  grab.body.wakeUp();
+}
+function releaseGrab() {
+  if (!grab) return;
+  world.removeConstraint(grab.c); world.removeBody(grab.anchor);
+  grab.body.linearDamping = grab.damp;
+  if (grab.body.rd) { grab.body.rd.grabbed = Math.max(0, grab.body.rd.grabbed - 1); grab.body.rd.stun = Math.max(grab.body.rd.stun, 1.2); }
+  grab = null;
+  canvas.style.cursor = tool === 'hand' ? 'grab' : 'crosshair';
+}
+
+// ---------- пистолет ----------
+let firing = false, fireCD = 0;
+function shoot() {
+  ray.setFromCamera(mouse, camera);
+  const dir = ray.ray.direction.clone();
+  const h = pick();
+  SFX.shot();
+  shake = Math.max(shake, 0.06);
+  // трассер
+  const from = camera.position.clone().addScaledVector(dir, 1).add(new THREE.Vector3(0, -0.25, 0));
+  const to = h ? h.point : from.clone().addScaledVector(dir, 80);
+  for (let i = 0; i < 6; i++) { const t = Math.random(); fxAdd.spawn(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, from.z + (to.z - from.z) * t, 0, 0, 0, 0.06, 0.06, 1, 0.9, 0.5, 0.8, 0, 0, 0, 2); }
+  if (!h) return;
+  const b = h.body;
+  if (h.obj && h.obj.explosive) { const o = h.obj; after(() => detonate(o)); return; }
+  if (b && b.type === CANNON.Body.DYNAMIC) {
+    b.wakeUp();
+    const rel = new CANNON.Vec3(h.point.x - b.position.x, h.point.y - b.position.y, h.point.z - b.position.z);
+    const J = b.rd ? 22 : 30;
+    b.applyImpulse(new CANNON.Vec3(dir.x * J, dir.y * J, dir.z * J), rel);
+    if (b.rd) {
+      const rd = b.rd, wasAlive = rd.alive;
+      rd.hurt(b.part === 'head' ? 40 : 22, b.part, 2.5);
+      bloodBurst(h.point, dir, 10, 3);
+      bloodBurst(h.point, dir.clone().negate(), 4, 2);
+      if (OPT.dismember && b.part !== 'pelvis' && b.part !== 'chest' && rd.by[b.part].dmg > (b.part === 'head' ? 110 : 75)) after(() => detachPart(rd, b.part));
+      if (wasAlive && !rd.alive) SFX.die(); else if (rd.alive) SFX.ouch();
+    } else {
+      for (let i = 0; i < 6; i++) fxAdd.spawn(h.point.x, h.point.y, h.point.z, rand(-3, 3), rand(0, 3), rand(-3, 3), rand(0.15, 0.3), 0.05, 1, 0.8, 0.4, 1, 9.8, 0, 0, 2);
     }
-    if (on !== chunkOn[ci] || det !== detailOn[ci]) {
-      chunkOn[ci] = on; detailOn[ci] = det;
-      for (const o of world.chunks[ci]) o.visible = o.userData.detail ? !!det : !!on;
-    }
+  } else {
+    dust(h.point, 5);
+    for (let i = 0; i < 4; i++) fxAdd.spawn(h.point.x, h.point.y, h.point.z, rand(-3, 3), rand(0, 3), rand(-3, 3), rand(0.15, 0.3), 0.05, 1, 0.8, 0.4, 1, 9.8, 0, 0, 2);
+    if (h.ground) decals.add(h.point.x, 0, h.point.z, 0.06, '#222');
   }
 }
-const ents = new THREE.Group(); scene.add(ents);
-const P = { x: 0, y: 0, yaw: 0, pitch: 0, a: 0, light: true, battery: 100, stepT: 0, bob: 0, moving: false, running: false, crouch: false, r: 0.22, eyeY: 1.62 };
-let caughtBy = null, caughtT = 0, lampTimer = 0, exploreTimer = 0, miniTimer = 0;
 
-const w = v => v * S; // тайлы → метры
+function useTool() {
+  audioInit();
+  const h = tool === 'gun' || tool === 'rocket' ? null : pick();
+  switch (tool) {
+    case 'hand': if (h && h.body) startGrab(h); break;
+    case 'human': { const p = placePoint(); if (p && spawnRagdoll(p, camera.position)) SFX.spawn(); break; }
+    case 'crate': { const p = placePoint(); if (p) { spawnCrate(p, keys.ShiftLeft || keys.ShiftRight ? 1.8 : 1); SFX.spawn(); } break; }
+    case 'barrel': { const p = placePoint(); if (p) { spawnBarrel(p); SFX.spawn(); } break; }
+    case 'bomb': { const p = placePoint(); if (p) { spawnBomb(p); SFX.spawn(); } break; }
+    case 'tramp': { const p = placePoint(); if (p) { spawnTrampoline(p); SFX.spawn(); } break; }
+    case 'gun': shoot(); firing = true; fireCD = 0.16; break;
+    case 'rocket': {
+      ray.setFromCamera(mouse, camera);
+      const dir = ray.ray.direction.clone();
+      const from = camera.position.clone().addScaledVector(dir, 1.2).add(new THREE.Vector3(0, -0.2, 0));
+      spawnRocket(from, dir); shake = Math.max(shake, 0.12);
+      break;
+    }
+    case 'pin': if (h && h.body && h.body.type === CANNON.Body.DYNAMIC) addPin(h.body, h.point); break;
+    case 'erase':
+      if (!h) break;
+      if (h.pin) { removePin(h.pin); SFX.erase(); }
+      else if (h.body && h.body.rd) { removeRagdoll(h.body.rd); SFX.erase(); }
+      else if (h.obj) { removeObj(h.obj); SFX.erase(); }
+      break;
+  }
+}
+
+// ============================================================
+//  Камера
+// ============================================================
+const cam = { yaw: 0.45, pitch: 0.3, dist: 11, target: new THREE.Vector3(-1, 1.1, 1) };
+const keys = {};
+let orbiting = false, panning = false, lastPX = 0, lastPY = 0;
+function updateCamera(dt) {
+  const sp = (keys.ShiftLeft || keys.ShiftRight ? 22 : 10) * dt;
+  const fx = -Math.sin(cam.yaw), fz = -Math.cos(cam.yaw), rx = Math.cos(cam.yaw), rz = -Math.sin(cam.yaw);
+  if (keys.KeyW) { cam.target.x += fx * sp; cam.target.z += fz * sp; }
+  if (keys.KeyS) { cam.target.x -= fx * sp; cam.target.z -= fz * sp; }
+  if (keys.KeyA) { cam.target.x -= rx * sp; cam.target.z -= rz * sp; }
+  if (keys.KeyD) { cam.target.x += rx * sp; cam.target.z += rz * sp; }
+  if (keys.KeyE) cam.target.y += sp;
+  if (keys.KeyQ) cam.target.y -= sp;
+  cam.target.y = Math.min(40, Math.max(0.3, cam.target.y));
+  cam.target.x = Math.max(-150, Math.min(150, cam.target.x)); cam.target.z = Math.max(-150, Math.min(150, cam.target.z));
+  const cp = Math.cos(cam.pitch);
+  camera.position.set(cam.target.x + Math.sin(cam.yaw) * cp * cam.dist, cam.target.y + Math.sin(cam.pitch) * cam.dist, cam.target.z + Math.cos(cam.yaw) * cp * cam.dist);
+  if (camera.position.y < 0.3) camera.position.y = 0.3;
+  camera.lookAt(cam.target);
+  if (shake > 0.001) {
+    camera.position.x += rand(-1, 1) * shake * 0.4; camera.position.y += rand(-1, 1) * shake * 0.4; camera.position.z += rand(-1, 1) * shake * 0.4;
+    shake *= Math.pow(0.02, dt);
+  }
+  // тень следует за камерой
+  if (QP.shadows) {
+    sun.target.position.copy(cam.target); sun.target.position.y = 0;
+    sun.position.set(cam.target.x + 10, 18, cam.target.z + 7);
+  }
+}
 
 // ============================================================
 //  Ввод
 // ============================================================
-const keys = {};
-const input = { joyX: 0, joyY: 0, run: false, crouch: false, locked: false };
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('pointerdown', e => {
+  if (state !== 'play') return;
+  canvas.setPointerCapture(e.pointerId);
+  setMouse(e);
+  lastPX = e.clientX; lastPY = e.clientY;
+  if (e.button === 0) useTool();
+  else if (e.button === 2) orbiting = true;
+  else if (e.button === 1) { panning = true; e.preventDefault(); }
+});
+function setMouse(e) {
+  const r = canvas.getBoundingClientRect();
+  mousePx.x = e.clientX; mousePx.y = e.clientY;
+  mouse.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+  mouse.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  mouseMoved = true;
+}
+let mouseMoved = false;
+window.addEventListener('pointermove', e => {
+  setMouse(e);
+  const dx = e.clientX - lastPX, dy = e.clientY - lastPY; lastPX = e.clientX; lastPY = e.clientY;
+  if (orbiting) { cam.yaw -= dx * 0.005; cam.pitch = Math.min(1.45, Math.max(-0.1, cam.pitch + dy * 0.005)); }
+  if (panning) {
+    const k = cam.dist * 0.0018;
+    cam.target.x -= (Math.cos(cam.yaw) * dx) * k; cam.target.z -= (-Math.sin(cam.yaw) * dx) * k; cam.target.y += dy * k;
+  }
+});
+window.addEventListener('pointerup', e => {
+  if (e.button === 0) { releaseGrab(); firing = false; }
+  if (e.button === 2) orbiting = false;
+  if (e.button === 1) panning = false;
+});
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (grab) { grab.dist = Math.max(1.5, Math.min(60, grab.dist * (e.deltaY > 0 ? 0.9 : 1.1))); return; }
+  cam.dist = Math.max(3, Math.min(70, cam.dist * (e.deltaY > 0 ? 1.12 : 0.89)));
+}, { passive: false });
+
 window.addEventListener('keydown', e => {
   keys[e.code] = true;
-  if (['Space', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault();
-  if (G.state === 'play') {
-    if (e.code === 'KeyF') toggleLight();
-    if (e.code === 'KeyE' || e.code === 'Space' || e.code === 'Enter') interact();
-    if (e.code === 'KeyM') G.showMap = !G.showMap;
-    if (e.code === 'Backquote') { fpsBox.checked = !fpsBox.checked; showFps(fpsBox.checked); }
-    if (e.code === 'KeyC' || e.code === 'ControlLeft') input.crouch = !input.crouch;
-    if (e.code === 'KeyP' || (e.code === 'Escape' && isTouch)) pauseGame();
-  } else if (G.state === 'pause' && e.code === 'KeyP') resumeGame();
-  else if (G.state === 'menu' && e.code === 'Enter') startRun();
+  if (e.code === 'Escape') { if (state === 'play') openMenu(); else if (started) closeMenu(); return; }
+  if (e.code === 'Backquote') { $('optFPS').checked = !OPT.fps; saveOpt('fps', !OPT.fps); applyFps(); return; }
+  if (state !== 'play') return;
+  if (/^Digit[0-9]$/.test(e.code)) { const n = +e.code[5]; const t = TOOLS[(n + 9) % 10]; if (t) { setTool(t.id); SFX.click(); } }
+  if (e.code === 'KeyT') { timeScale = timeScale === 1 ? 0.25 : 1; updateStatus(); }
+  if (e.code === 'KeyG') { gravIdx = (gravIdx + 1) % GRAVS.length; world.gravity.set(0, GRAVS[gravIdx].g, 0); for (const b of world.bodies) b.wakeUp(); updateStatus(); toast('Гравитация: ' + GRAVS[gravIdx].name); }
+  if (e.code === 'KeyP') { physPaused = !physPaused; updateStatus(); }
+  if (e.code === 'Delete' || e.code === 'Backspace') { clearAll(); toast('Всё очищено'); }
+  if (e.code === 'KeyR') { resetScene(); toast('Сцена сброшена'); }
+  if (e.code === 'KeyH') $('help').classList.toggle('hidden');
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
-window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; if (G.state === 'play') pauseGame(); });
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; releaseGrab(); firing = false; orbiting = panning = false; });
 
-const cvs = $('game');
-cvs.addEventListener('click', () => {
-  if (isTouch || G.state !== 'play') return;
-  if (!input.locked) { cvs.requestPointerLock?.(); return; }
-  interact();
-});
-document.addEventListener('pointerlockchange', () => {
-  input.locked = document.pointerLockElement === cvs;
-  $('lockHint').classList.toggle('hidden', input.locked || isTouch || G.state !== 'play');
-  if (!input.locked && G.state === 'play' && !isTouch) pauseGame();
-});
-document.addEventListener('mousemove', e => {
-  if (!input.locked || G.state !== 'play') return;
-  const sens = 0.0022 * (+localStorage.getItem('digger3d_sens') || 1);
-  P.yaw -= e.movementX * sens; P.pitch -= e.movementY * sens;
-  P.pitch = clamp(P.pitch, -1.35, 1.35);
-});
+// ============================================================
+//  Сцена: очистка / сброс
+// ============================================================
+function clearAll() {
+  releaseGrab();
+  while (pins.length) removePin(pins[0]);
+  while (rags.length) removeRagdoll(rags[0]);
+  while (objs.length) removeObj(objs[0]);
+  fxAdd.clear(); fxNorm.clear(); decals.clear();
+  later.length = 0;
+}
+function resetScene() {
+  clearAll();
+  gravIdx = 0; world.gravity.set(0, -9.82, 0); timeScale = 1; physPaused = false;
+  for (let i = 0; i < 4; i++) spawnRagdoll(new THREE.Vector3(-3 + i * 2, 0, 1), new THREE.Vector3(-3 + i * 2, 0, 20));
+  for (let i = 0; i < 3; i++) spawnCrate(new THREE.Vector3(6, i * 1.0, -3));
+  spawnCrate(new THREE.Vector3(7.2, 0, -3));
+  spawnBarrel(new THREE.Vector3(-6, 0, -4)); spawnBarrel(new THREE.Vector3(-6.9, 0, -4.4));
+  spawnTrampoline(new THREE.Vector3(-4, 0, 9));
+  for (let i = 0; i < 2; i++) spawnRagdoll(new THREE.Vector3(-17 + i * 1.6, 6.25, -12.5), new THREE.Vector3(-14, 0, 10));
+  updateStatus();
+}
 
-// --- тач: джойстик слева, обзор пальцем справа
-const joy = { id: null, ox: 0, oy: 0 }, look = { id: null, x: 0, y: 0 };
-const joyBase = $('joyBase'), joyKnob = $('joyKnob');
-window.addEventListener('touchstart', e => {
-  if (G.state !== 'play') return;
-  for (const t of e.changedTouches) {
-    if (t.target.tagName === 'BUTTON') continue;
-    if (joy.id === null && t.clientX < innerWidth * 0.45) {
-      joy.id = t.identifier; joy.ox = t.clientX; joy.oy = t.clientY;
-      joyBase.style.left = (t.clientX - 65) + 'px'; joyBase.style.top = (t.clientY - 65) + 'px'; joyBase.style.bottom = 'auto'; joyBase.style.opacity = 1;
-    } else if (look.id === null) { look.id = t.identifier; look.x = t.clientX; look.y = t.clientY; }
+// ============================================================
+//  Физика: шаг
+// ============================================================
+// силы прикладываем ДО шага (их видит решатель суставов и контактов)
+const FIXED = 1 / 60;
+let acc = 0;
+function prePhysics() {
+  simTime += FIXED;
+  const gScale = Math.abs(world.gravity.y) / 9.82;
+  for (const rd of rags) rd.preStep(FIXED, simTime, OPT.getup && gScale > 0.05, gScale);
+  for (const o of objs) if (o.kind === 'rocket') o.body.force.y -= world.gravity.y * o.body.mass;
+  for (const b of world.bodies) {
+    if (b.type === CANNON.Body.STATIC) continue;
+    if (!b._pp) { b._pp = new CANNON.Vec3(); b._pq = new CANNON.Quaternion(); }
+    b._pp.copy(b.position); b._pq.copy(b.quaternion);
   }
-  e.preventDefault();
-}, { passive: false });
-window.addEventListener('touchmove', e => {
-  for (const t of e.changedTouches) {
-    if (t.identifier === joy.id) {
-      let dx = t.clientX - joy.ox, dy = t.clientY - joy.oy; const l = Math.hypot(dx, dy), m = 50;
-      if (l > m) { dx = dx / l * m; dy = dy / l * m; }
-      input.joyX = dx / m; input.joyY = dy / m;
-      joyKnob.style.left = (37 + dx) + 'px'; joyKnob.style.top = (37 + dy) + 'px';
-    } else if (t.identifier === look.id) {
-      P.yaw -= (t.clientX - look.x) * 0.006; P.pitch -= (t.clientY - look.y) * 0.006;
-      P.pitch = clamp(P.pitch, -1.3, 1.3); look.x = t.clientX; look.y = t.clientY;
+}
+const MAX_V = 70;
+function postPhysics() {
+  // страховка от «взрыва» решателя: ограничиваем скорость
+  for (const b of world.bodies) {
+    if (b.type !== CANNON.Body.DYNAMIC) continue;
+    const v2 = b.velocity.lengthSquared();
+    if (v2 > MAX_V * MAX_V) b.velocity.scale(MAX_V / Math.sqrt(v2), b.velocity);
+    if (b.angularVelocity.lengthSquared() > 900) b.angularVelocity.scale(30 / b.angularVelocity.length(), b.angularVelocity);
+    if (b.rd && b.position.y < -0.3 && Math.abs(b.position.x) < 1e4) { b.position.y = 0.2; b.velocity.y = Math.abs(b.velocity.y) * 0.2; } // провалился под пол
+  }
+}
+function physicsStep(sdt) {
+  acc += sdt;
+  let n = 0;
+  while (acc >= FIXED && n < 4) { prePhysics(); world.step(FIXED); postPhysics(); acc -= FIXED; n++; }
+  if (n === 4 && acc > FIXED) acc = 0;
+  // интерполяция между шагами: плавно и при замедлении времени
+  const a = acc / FIXED;
+  for (const b of world.bodies) {
+    if (b.type === CANNON.Body.STATIC || !b._pp) continue;
+    b._pp.lerp(b.position, a, b.interpolatedPosition);
+    b._pq.slerp(b.quaternion, a, b.interpolatedQuaternion);
+  }
+}
+world.addEventListener('postStep', () => {
+  // кто стоит ногами на опоре
+  for (const c of world.contacts) {
+    const bi = c.bi, bj = c.bj;
+    if (bi.rd && (bi.part === 'lLegL' || bi.part === 'lLegR') && c.ni.y < -0.5 && bj.rd !== bi.rd) bi.rd.groundT = simTime;
+    if (bj.rd && (bj.part === 'lLegL' || bj.part === 'lLegR') && c.ni.y > 0.5 && bi.rd !== bj.rd) bj.rd.groundT = simTime;
+  }
+});
+
+function updateObjects(dt) {
+  for (const o of objs.slice()) {
+    if (o.kind === 'bomb') {
+      o.fuse -= dt;
+      const rate = o.fuse < 1 ? 0.12 : 0.35;
+      const on = (o.fuse % rate) < rate / 2;
+      o.led.material.color.setHex(on ? 0xff2020 : 0x550000);
+      if (on && !o.ledOn) SFX.beep(o.fuse < 1 ? 1600 : 1100);
+      o.ledOn = on;
+      if (o.fuse <= 0) detonate(o);
+    } else if (o.kind === 'rocket') {
+      o.life -= dt;
+      const p = o.body.position, v = o.body.velocity;
+      if (Math.random() < (QP.lite ? 0.5 : 1)) fxNorm.spawn(p.x, p.y, p.z, rand(-0.3, 0.3), rand(0, 0.5), rand(-0.3, 0.3), rand(0.6, 1.1), rand(0.2, 0.35), 0.7, 0.7, 0.7, 0.5, -0.2, 1, 0.8, 2);
+      fxAdd.spawn(p.x - v.x * 0.01, p.y - v.y * 0.01, p.z - v.z * 0.01, 0, 0, 0, 0.08, 0.3, 1, 0.6, 0.2, 1, 0, 0, 0, 2);
+      if (o.life <= 0 || p.y < -5) detonate(o);
     }
   }
-  if (G.state === 'play') e.preventDefault();
-}, { passive: false });
-function touchEnd(e) {
-  for (const t of e.changedTouches) {
-    if (t.identifier === joy.id) { joy.id = null; input.joyX = input.joyY = 0; joyKnob.style.left = joyKnob.style.top = '37px'; joyBase.style.opacity = 0.6; }
-    if (t.identifier === look.id) look.id = null;
-  }
 }
-window.addEventListener('touchend', touchEnd); window.addEventListener('touchcancel', touchEnd);
-function bindBtn(id, down, up) {
-  const el = $(id);
-  el.addEventListener('touchstart', e => { e.preventDefault(); e.stopPropagation(); audioInit(); down(el); }, { passive: false });
-  el.addEventListener('touchend', e => { e.preventDefault(); up && up(el); }, { passive: false });
-  el.addEventListener('mousedown', e => { e.stopPropagation(); down(el); });
-  el.addEventListener('mouseup', () => up && up(el));
-}
-bindBtn('btnRun', el => { input.run = true; el.classList.add('on'); }, el => { input.run = false; el.classList.remove('on'); });
-bindBtn('btnAct', () => interact());
-bindBtn('btnLight', () => toggleLight());
-bindBtn('btnCrouch', el => { input.crouch = !input.crouch; el.classList.toggle('on', input.crouch); });
-bindBtn('btnMap', () => { G.showMap = !G.showMap; });
-bindBtn('btnPause', () => pauseGame());
 
-// ============================================================
-//  UI
-// ============================================================
-const ui = { hud: $('hud'), level: $('hLevel'), batFill: $('batFill'), batTxt: $('batTxt'), score: $('hScore'), photo: $('hPhoto'), room: $('roomName'), prompt: $('prompt'), log: $('log'), touch: $('touch'), mini: $('minimap'), red: $('redOverlay'), flash: $('flashOverlay'), stance: $('hStance') };
-const miniCtx = ui.mini.getContext('2d');
-function msg(text, cls = '') {
-  const d = document.createElement('div'); d.textContent = text; if (cls) d.className = cls;
-  ui.log.appendChild(d);
-  while (ui.log.children.length > 5) ui.log.removeChild(ui.log.firstChild);
-  setTimeout(() => { d.style.transition = 'opacity .6s'; d.style.opacity = 0; setTimeout(() => d.remove(), 650); }, 4200);
-}
-const setText = (el, t) => { if (el.textContent !== t) el.textContent = t; };
-function showBest() {
-  const b = +(localStorage.getItem('digger_best') || 0), d = +(localStorage.getItem('digger_depth') || 0);
-  $('best').textContent = b ? `Рекорд: ${b} респекта · глубже всего: ярус −${d}` : '';
-}
-showBest();
-// --- меню графики
-const perfBox = $('optPerf');
-perfBox.checked = PERF;
-perfBox.addEventListener('change', () => setPerf(perfBox.checked));
-$('quality').classList.toggle('disabled', PERF);
-document.querySelectorAll('#quality button').forEach(b => {
-  b.classList.toggle('on', AUTO ? b.dataset.q === 'auto' : b.dataset.q === QUALITY);
-  if (b.dataset.q === 'auto' && AUTO) b.textContent = `Авто: ${PRESETS[QUALITY].label}`;
-  b.addEventListener('click', () => setPreset(b.dataset.q));
-});
-const gpuName = GPU ? GPU.replace(/^ANGLE \(|\)$/g, '').replace(/ Direct3D.*$/, '').slice(0, 70) : 'не определена';
-$('gpuInfo').textContent = `Видеокарта: ${gpuName}` + (PERF
-  ? ` · включён режим производительности${PERF_AUTO ? ' (автоматически: слабая видеокарта)' : ''}`
-  : (WEAK_GPU ? ' · видеокарта слабая — если тормозит, включи режим производительности' : ''));
-const fpsBox = $('optFPS');
-const showFps = v => { $('fps').classList.toggle('hidden', !v); localStorage.setItem('digger3d_fps', v ? '1' : '0'); };
-fpsBox.checked = localStorage.getItem('digger3d_fps') !== '0'; showFps(fpsBox.checked);
-fpsBox.addEventListener('change', () => showFps(fpsBox.checked));
-
-// ============================================================
-//  Уровень
-// ============================================================
-function clearEntities() {
-  while (ents.children.length) {
-    const o = ents.children.pop();
-    o.traverse(c => { if (c.geometry) c.geometry.dispose(); });
+function syncMeshes() {
+  for (const o of objs) {
+    const b = o.body; if (b.type === CANNON.Body.STATIC) continue;
+    const p = b.interpolatedPosition, q = b.interpolatedQuaternion;
+    o.mesh.position.set(p.x, p.y, p.z);
+    if (o.kind === 'rocket') { const v = b.velocity; if (v.lengthSquared() > 1) o.mesh.lookAt(p.x + v.x, p.y + v.y, p.z + v.z); }
+    else o.mesh.quaternion.set(q.x, q.y, q.z, q.w);
   }
-}
-function enterLevel(first) {
-  G.state = 'trans';
-  const tr = $('trans');
-  $('transText').innerHTML = first ? 'ЛЕЗЕШЬ В ВЕНТШАХТУ…<br><small>ЯРУС −1</small>' : `СПУСКАЕШЬСЯ НИЖЕ…<br><small>ЯРУС −${G.level}</small>`;
-  tr.classList.remove('hidden'); tr.style.animation = 'none'; void tr.offsetWidth; tr.style.animation = '';
-  setTimeout(() => {
-    disposeWorld(world, scene); clearEntities();
-    genLevel(G.level);
-    world = buildWorld(scene);
-    chunkOn.fill(1); detailOn.fill(1);
-    // предметы
-    for (const it of G.items) {
-      const m = makeItem(it.type); m.position.set(w(it.x), tileAt(it.x, it.y) === WATER ? 0.04 : 0, w(it.y)); m.rotation.y = Math.random() * 6;
-      it.mesh = m; ents.add(m);
+  for (const rd of rags) rd.sync(true);
+  spinner.mesh.position.copy(spinner.position); spinner.mesh.quaternion.copy(spinner.quaternion);
+  // мягкие тени-пятна
+  if (QP.blobs) {
+    const from = new CANNON.Vec3(), to = new CANNON.Vec3(), res = new CANNON.RaycastResult();
+    for (const rd of rags) {
+      const p = rd.pelvis.interpolatedPosition;
+      from.set(p.x, p.y, p.z); to.set(p.x, p.y - 30, p.z); res.reset();
+      world.raycastClosest(from, to, { collisionFilterMask: G_STATIC | G_OBJ, skipBackfaces: true }, res);
+      const gy = res.hasHit ? res.hitPointWorld.y : 0, h = Math.max(0, p.y - gy);
+      const s = Math.max(0.3, 1.3 - h * 0.12);
+      rd.blob.position.set(p.x, gy + 0.02, p.z); rd.blob.scale.set(s, 1, s);
+      rd.blob.material.opacity = Math.max(0.1, 1 - h * 0.12);
     }
-    for (const g of G.guards) { g.mesh = makeGuard(); g.walk = 0; ents.add(g.mesh); }
-    for (const r of G.rats) { r.mesh = makeRat(); ents.add(r.mesh); }
-    // игрок у люка
-    P.x = G.exit.x + 0.5; P.y = G.exit.y + 0.5;
-    for (const [dx, dy] of [[0, 1], [1, 0], [-1, 0], [0, -1]]) if (!isSolid(G.exit.x + dx, G.exit.y + dy)) { P.x += dx * 0.9; P.y += dy * 0.9; break; }
-    // смотрим в сторону от люка, к центру комнаты
-    const r0 = G.rooms[0];
-    P.yaw = Math.atan2(-(r0.cx + 0.5 - P.x + 0.001), -(r0.cy + 2.5 - P.y));
-    P.pitch = 0; P.light = P.battery > 0;
-    // лунный свет
-    if (moon) { moon.position.set(w(G.exit.x + 0.5), WH + 3.5, w(G.exit.y + 0.5)); moonTarget.position.set(w(G.exit.x + 0.5), 0, w(G.exit.y + 0.5)); moon.intensity = 60; }
-    for (const L of G.lamps) L.on = true;
-    G.curZone = -2; G.chaseT = 0; G.flash = 0; caughtBy = null;
-    ui.log.innerHTML = '';
-    lampTimer = 0;
-    renderer.compile(scene, camera);
-  }, 350);
-  ui.hud.classList.remove('hidden');
-  if (isTouch) ui.touch.classList.remove('hidden');
-  setTimeout(() => {
-    if (G.state !== 'trans') return;
-    G.state = 'play';
-    if (!isTouch && !input.locked) $('lockHint').classList.remove('hidden');
-    if (first) {
-      msg('Ты пролез в бомбарь. Ищи хабар и не попадись ЧОПу.', 'info');
-      msg(isTouch ? 'Слева — идти, справа — смотреть. Кнопки: бег, фото, фонарь, присесть.' : 'WASD — идти, мышь — смотреть, Shift — бег, C — присесть, F — фонарь, E — фото.', 'info');
-    } else msg(`Ярус −${G.level}. Охраны тут больше: ${G.guards.length} чел.`, 'bad');
-  }, 1300);
-  setTimeout(() => tr.classList.add('hidden'), 1900);
+  }
+  // кровь из ран
+  if (OPT.blood) for (const rd of rags) for (const s of rd.stumps) {
+    if (s.t <= 0) continue;
+    s.t -= 1 / 60;
+    if (Math.random() < 0.5) {
+      const w = new CANNON.Vec3(); s.body.pointToWorldFrame(s.local, w);
+      const dir = s.body.quaternion.vmult(s.local.clone().unit());
+      const k = rand(1, 3) * Math.min(1, s.t);
+      fxNorm.spawn(w.x, w.y, w.z, dir.x * k + rand(-0.4, 0.4), dir.y * k + rand(0, 0.8), dir.z * k + rand(-0.4, 0.4), rand(0.5, 1), rand(0.05, 0.09), 0.55, 0.03, 0.03, 1, 9.8, 0.3, 0, 1);
+    }
+  }
 }
 
-function startRun() {
+// ============================================================
+//  Интерфейс
+// ============================================================
+let state = 'menu', started = false;
+function openMenu() {
+  state = 'menu'; releaseGrab(); firing = false;
+  $('menu').classList.remove('hidden'); $('btnPlay').textContent = started ? 'ПРОДОЛЖИТЬ' : 'ИГРАТЬ';
+}
+function closeMenu() {
   audioInit();
-  G.level = 1; G.lootScore = 0; G.photoScore = 0; G.photos = 0; G.bag = []; P.battery = 100; input.crouch = false;
-  $('menu').classList.add('hidden'); $('end').classList.add('hidden');
-  if (!isTouch) cvs.requestPointerLock?.();
-  enterLevel(true);
+  state = 'play'; started = true;
+  $('menu').classList.add('hidden'); $('hud').classList.remove('hidden');
 }
-function pauseGame() {
-  if (G.state !== 'play') return;
-  G.state = 'pause'; $('pause').classList.remove('hidden'); $('lockHint').classList.add('hidden');
-  if (document.pointerLockElement) document.exitPointerLock();
-}
-function resumeGame() {
-  if (G.state !== 'pause') return;
-  G.state = 'play'; $('pause').classList.add('hidden'); audioInit();
-  if (!isTouch) cvs.requestPointerLock?.();
-}
-$('btnStart').addEventListener('click', startRun);
-$('btnAgain').addEventListener('click', () => { $('end').classList.add('hidden'); startRun(); });
-$('btnMenu').addEventListener('click', () => { $('end').classList.add('hidden'); $('menu').classList.remove('hidden'); G.state = 'menu'; showBest(); });
-$('btnResume').addEventListener('click', resumeGame);
-$('btnQuit').addEventListener('click', () => { $('pause').classList.add('hidden'); G.state = 'play'; endRun(false); });
+$('btnPlay').addEventListener('click', closeMenu);
+$('btnReset').addEventListener('click', () => { resetScene(); closeMenu(); });
 
-function endRun(caught) {
-  G.state = 'end';
-  if (document.pointerLockElement) document.exitPointerLock();
-  ui.hud.classList.add('hidden'); ui.prompt.classList.add('hidden'); ui.touch.classList.add('hidden'); $('lockHint').classList.add('hidden');
-  ui.red.style.opacity = 0;
-  const total = caught ? G.photoScore : G.photoScore + G.lootScore;
-  const prevBest = +(localStorage.getItem('digger_best') || 0);
-  if (total > prevBest) localStorage.setItem('digger_best', total);
-  if (G.level > +(localStorage.getItem('digger_depth') || 0)) localStorage.setItem('digger_depth', G.level);
-  if (caught) {
-    SFX.caught();
-    $('endTitle').textContent = 'ПОВЯЗАЛИ'; $('endTitle').style.color = '#e04b3a';
-    $('endText').textContent = pick([
-      'ЧОП скрутил тебя прямо у гермодвери. Весь хабар изъят «до выяснения». Хорошо хоть фотки успели улететь в облако.',
-      'Охранник Михалыч светит тебе в лицо: «Ну что, сталкер, приехали». Хабар конфискован, фотки остались.',
-      'Тебя вывели наверх под руки и сдали участковому. Хабар — в каморку ЧОПа. Зато фотки — твои.',
-    ]);
-  } else {
-    SFX.win();
-    $('endTitle').textContent = 'ВЫЛАЗКА УДАЛАСЬ'; $('endTitle').style.color = '#e8c547';
-    $('endText').textContent = G.bag.length || G.photos
-      ? 'Ты вылез через люк в рассветный туман. Рюкзак приятно оттягивает плечи. Пост в паблик диггеров обеспечен.'
-      : 'Ты вылез ни с чем. Ну хоть воздухом бомбаря подышал.';
-  }
-  $('endStats').innerHTML = `Глубина: ярус −${G.level}<br>Хабар: ${caught ? '<s>' + G.lootScore + '</s> 0' : G.lootScore} · Фото: ${G.photos} шт. (+${G.photoScore})<br><b>ИТОГО: ${total} респекта</b>` + (total > prevBest && total > 0 ? '<br>🏆 НОВЫЙ РЕКОРД!' : '');
-  const counts = {}; for (const b of G.bag) counts[b] = (counts[b] || 0) + 1;
-  const list = Object.entries(counts).map(([k, v]) => `${k}${v > 1 ? ' ×' + v : ''}`);
-  $('endBag').innerHTML = list.length ? (caught ? 'Изъято: ' : 'В рюкзаке: ') + list.join(' · ') : '';
-  $('end').classList.remove('hidden');
+// hotbar
+{
+  const hb = $('hotbar');
+  TOOLS.forEach((t, i) => {
+    const d = document.createElement('div');
+    d.className = 'slot'; d.dataset.tool = t.id; d.title = t.hint;
+    d.innerHTML = `<span class="key">${(i + 1) % 10}</span><span class="ico">${t.icon}</span><span class="nm">${t.name}</span>`;
+    d.addEventListener('click', () => { setTool(t.id); SFX.click(); });
+    hb.appendChild(d);
+  });
+  setTool('hand');
 }
+let toastT = 0;
+function toast(msg) { const el = $('toast'); el.textContent = msg; el.classList.add('show'); toastT = 2.2; }
+function updateStatus() {
+  const flags = [];
+  if (physPaused) flags.push('⏸ Пауза физики');
+  if (timeScale !== 1) flags.push('🐢 Замедление');
+  if (gravIdx !== 0) flags.push('🪐 ' + GRAVS[gravIdx].name);
+  $('flags').textContent = flags.join('  ·  ');
+}
+function updateCounters() {
+  const alive = rags.filter(r => r.alive).length;
+  $('counters').textContent = `Человечков: ${rags.length}/${QP.maxRagdolls} (живых ${alive}) · Предметов: ${objs.length}`;
+}
+// подсказка над человечком под курсором
+function updateTip() {
+  const tip = $('tip');
+  if (state !== 'play' || orbiting || panning || grab) { tip.classList.add('hidden'); return; }
+  const h = pick();
+  if (h && h.body && h.body.rd) {
+    const rd = h.body.rd;
+    const st = !rd.alive ? '💀 мёртв' : rd.stun > 0 ? '😵 оглушён' : rd.canStand() ? '🙂 в норме' : '🤕 ранен';
+    tip.innerHTML = `<b>Человечек #${rd.id}</b> ${st}<div class="hpbar"><i style="width:${Math.max(0, rd.hp)}%"></i></div>`;
+    tip.style.left = (mousePx.x + 16) + 'px'; tip.style.top = (mousePx.y + 12) + 'px';
+    tip.classList.remove('hidden');
+  } else tip.classList.add('hidden');
+}
+
+// настройки в меню
+{
+  const perfBox = $('optPerf');
+  perfBox.checked = PERF;
+  perfBox.addEventListener('change', () => setPerf(perfBox.checked));
+  $('quality').classList.toggle('disabled', PERF);
+  document.querySelectorAll('#quality button').forEach(b => {
+    b.classList.toggle('on', AUTO ? b.dataset.q === 'auto' : b.dataset.q === QUALITY);
+    if (b.dataset.q === 'auto' && AUTO) b.textContent = `Авто: ${PRESETS[QUALITY].label}`;
+    b.addEventListener('click', () => setPreset(b.dataset.q));
+  });
+  const gpuName = GPU ? GPU.replace(/^ANGLE \(|\)$/g, '').replace(/ Direct3D.*$/, '').slice(0, 70) : 'не определена';
+  $('gpuInfo').textContent = `Видеокарта: ${gpuName}` + (PERF
+    ? ` · включён режим производительности${PERF_AUTO ? ' (автоматически: слабая видеокарта)' : ''}`
+    : (WEAK_GPU ? ' · видеокарта слабая — если тормозит, включи режим производительности' : ''));
+  for (const [id, key] of [['optBlood', 'blood'], ['optDism', 'dismember'], ['optGetup', 'getup'], ['optFPS', 'fps']]) {
+    const el = $(id); el.checked = OPT[key];
+    el.addEventListener('change', () => { saveOpt(key, el.checked); if (key === 'fps') applyFps(); });
+  }
+}
+function applyFps() { $('fps').classList.toggle('hidden', !OPT.fps); }
+applyFps();
 
 // ============================================================
-//  Действия
+//  Размер окна
 // ============================================================
-function toggleLight() {
-  if (!P.light && P.battery <= 0) { SFX.empty(); msg('Батарейки сели. Ищи новые!', 'bad'); return; }
-  P.light = !P.light; SFX.click();
+function resize() {
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(innerWidth, innerHeight, false);
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  const scale = renderer.domElement.height / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+  fxAdd.mat.uniforms.uScale.value = scale; fxNorm.mat.uniforms.uScale.value = scale;
 }
-const levelMult = () => 1 + 0.35 * (G.level - 1);
-function nearestAction() {
-  if (dist(P.x, P.y, G.exit.x + 0.5, G.exit.y + 0.5) < 0.95) return { kind: 'exit' };
-  if (dist(P.x, P.y, G.down.x + 0.5, G.down.y + 0.5) < 1.25) return { kind: 'down' };
-  let best = null, bd = 2.3;
-  for (const s of G.spots) {
-    if (s.taken) continue;
-    const d = dist(P.x, P.y, s.px, s.py);
-    if (d > bd) continue;
-    const ang = Math.atan2(s.py - P.y, s.px - P.x);
-    if (Math.abs(angDiff(P.a, ang)) > 0.75) continue;
-    if (!los(P.x, P.y, s.px, s.py + 0.05)) continue;
-    bd = d; best = s;
-  }
-  return best ? { kind: 'photo', spot: best } : null;
-}
-function interact() {
-  if (G.state !== 'play') return;
-  const a = nearestAction(); if (!a) return;
-  if (a.kind === 'exit') endRun(false);
-  else if (a.kind === 'down') { G.level++; SFX.descend(); enterLevel(false); }
-  else {
-    const s = a.spot, info = SPOTS[s.kind]; s.taken = true;
-    const pts = Math.round(info.pts * levelMult());
-    G.photoScore += pts; G.photos++;
-    G.flash = 1; SFX.shutter();
-    ui.flash.style.transition = 'none'; ui.flash.style.opacity = 0.85; void ui.flash.offsetWidth; ui.flash.style.transition = 'opacity .45s'; ui.flash.style.opacity = 0;
-    msg(`📷 Сфоткал: ${info.name} (+${pts})`, 'good');
-    for (const g of G.guards) {
-      const d = dist(g.x, g.y, P.x, P.y);
-      if (d < 12 && los(g.x, g.y, P.x, P.y)) { g.susp = Math.max(g.susp, 0.75); investigate(g, P.x, P.y, 4); }
-    }
-    makeNoise(P.x, P.y, 4);
-  }
-}
-function makeNoise(x, y, radius) {
-  for (const g of G.guards) {
-    if (g.state === 'chase') continue;
-    if (dist(g.x, g.y, x, y) < radius) { g.susp = Math.max(g.susp, 0.35); investigate(g, x, y, 3.5); }
-  }
-}
-function investigate(g, x, y, t) {
-  if (g.state === 'chase') return;
-  if (g.state !== 'investigate') SFX.huh();
-  g.state = 'investigate'; g.tx = x; g.ty = y; g.timer = t;
-  g.path = findPath(g.x, g.y, x, y);
-}
-const canStand = (x, y, r) => !isSolid(Math.floor(x - r), Math.floor(y - r)) && !isSolid(Math.floor(x + r), Math.floor(y - r)) && !isSolid(Math.floor(x - r), Math.floor(y + r)) && !isSolid(Math.floor(x + r), Math.floor(y + r));
-
-// ============================================================
-//  Обновление
-// ============================================================
-function update(dt) {
-  G.time += dt;
-  P.a = Math.atan2(-Math.cos(P.yaw), -Math.sin(P.yaw));
-
-  if (caughtBy) { // анимация поимки
-    caughtT += dt;
-    const g = caughtBy, target = Math.atan2(-(w(g.x) - w(P.x)), -(w(g.y) - w(P.y)));
-    P.yaw += angDiff(P.yaw, target) * Math.min(1, dt * 6); P.pitch += (0.1 - P.pitch) * Math.min(1, dt * 5);
-    G.shake = 0.3;
-    if (caughtT > 1.3) { caughtBy = null; endRun(true); }
-    return;
-  }
-
-  // --- движение
-  let f = 0, s = 0;
-  if (keys.KeyW || keys.ArrowUp) f += 1;
-  if (keys.KeyS || keys.ArrowDown) f -= 1;
-  if (keys.KeyA) s -= 1;
-  if (keys.KeyD) s += 1;
-  if (keys.ArrowLeft) P.yaw += dt * 2.2;
-  if (keys.ArrowRight) P.yaw -= dt * 2.2;
-  if (input.joyX || input.joyY) { f = -input.joyY; s = input.joyX; }
-  let len = Math.hypot(f, s); if (len > 1) { f /= len; s /= len; len = 1; }
-  const moving = len > 0.15;
-  P.crouch = input.crouch;
-  const running = moving && !P.crouch && (keys.ShiftLeft || keys.ShiftRight || input.run);
-  const inWater = tileAt(P.x, P.y) === WATER;
-  let sp = (running ? 2.7 : P.crouch ? 0.8 : 1.55) * ((input.joyX || input.joyY) ? Math.max(len, 0.45) : 1);
-  if (inWater) sp *= 0.65;
-  const fx = -Math.sin(P.yaw), fz = -Math.cos(P.yaw), rx = Math.cos(P.yaw), rz = -Math.sin(P.yaw);
-  if (moving) {
-    const mx = (fx * f + rx * s), my = (fz * f + rz * s);
-    const nx = P.x + mx * sp * dt; if (canStand(nx, P.y, P.r)) P.x = nx;
-    const ny = P.y + my * sp * dt; if (canStand(P.x, ny, P.r)) P.y = ny;
-  }
-  P.moving = moving; P.running = running;
-
-  // --- шаги / шум
-  if (moving) {
-    P.bob += dt * sp * 5.2;
-    P.stepT -= dt * sp;
-    if (P.stepT <= 0) {
-      P.stepT = 0.42;
-      if (!P.crouch || inWater) SFX.step(running, inWater);
-      const r = running ? (inWater ? 8 : 6.5) : P.crouch ? (inWater ? 1.5 : 0) : (inWater ? 3 : 1.2);
-      if (r > 0) makeNoise(P.x, P.y, r);
-    }
-  }
-  const eyeTarget = P.crouch ? 1.0 : 1.62;
-  P.eyeY += (eyeTarget - P.eyeY) * Math.min(1, dt * 8);
-
-  // --- батарейка
-  if (P.light) {
-    P.battery -= dt * (0.55 + G.level * 0.06);
-    if (P.battery <= 0) { P.battery = 0; P.light = false; SFX.empty(); msg('Фонарь погас! Нужны батарейки.', 'bad'); }
-  }
-
-  // --- подбор
-  for (let i = G.items.length - 1; i >= 0; i--) {
-    const it = G.items[i];
-    if (dist(it.x, it.y, P.x, P.y) < 0.55) {
-      G.items.splice(i, 1); ents.remove(it.mesh);
-      if (it.type === 'battery') {
-        P.battery = Math.min(100, P.battery + 45); SFX.battery(); msg('🔋 Батарейки «Крона» — фонарь +45%', 'good');
-      } else {
-        const L = LOOT[it.type], pts = Math.round(L.pts * levelMult());
-        G.lootScore += pts; G.bag.push(L.name); SFX.pickup(); msg(`🎒 Хабар: ${L.name} (+${pts})`, 'good');
-      }
-    }
-  }
-
-  // --- охрана, крысы
-  let anyChase = false;
-  for (const g of G.guards) { updateGuard(g, dt); if (g.state === 'chase') anyChase = true; if (caughtBy || G.state !== 'play') return; }
-  for (const r of G.rats) updateRat(r, dt);
-
-  // --- эффекты
-  G.flash = Math.max(0, G.flash - dt * 3.5);
-  G.shake = Math.max(0, (G.shake || 0) - dt * 1.5);
-  for (const L of G.lamps) if (L.broken) { L.t = (L.t || 0) - dt; if (L.t <= 0) { L.on = !L.on; L.t = L.on ? 0.2 + Math.random() * 2.5 : 0.03 + Math.random() * 0.25; } }
-  if (anyChase) { G.heartT = (G.heartT || 0) - dt; if (G.heartT <= 0) { SFX.heart(); G.heartT = 0.55; } }
-  G.chaseT = anyChase ? Math.min(1, G.chaseT + dt * 2) : Math.max(0, G.chaseT - dt);
-  G.dripT = (G.dripT || 2) - dt;
-  if (G.dripT <= 0) { SFX.drip(Math.random() * 1.6 - 0.8); G.dripT = 1.5 + Math.random() * 5; }
-
-  // --- разведанная карта
-  exploreTimer -= dt;
-  if (exploreTimer <= 0) {
-    exploreTimer = 0.1;
-    const R = P.light ? 9 : 2.5;
-    for (let k = 0; k <= 24; k++) castRay(P.x, P.y, P.a - 0.65 + 1.3 * k / 24, R, true);
-    for (let k = 0; k < 16; k++) castRay(P.x, P.y, k / 16 * Math.PI * 2, 1.6, true);
-  }
-
-  // --- комната
-  const z = G.zone[Math.floor(P.y) * MW + Math.floor(P.x)];
-  if (z !== G.curZone) { G.curZone = z; setText(ui.room, z >= 0 ? '▸ ' + ROOM_TYPES[G.rooms[z].type].name : '▸ Коридор'); }
-
-  // --- подсказка
-  const a = nearestAction(), key = isTouch ? '📷' : 'E';
-  let pt = '';
-  if (a) pt = a.kind === 'exit' ? `${key} — вылезти наружу (закончить вылазку)` : a.kind === 'down' ? `${key} — спуститься на ярус −${G.level + 1}` : `${key} — сфоткать: ${SPOTS[a.spot.kind].name}`;
-  if (pt) { setText(ui.prompt, pt); ui.prompt.classList.remove('hidden'); } else ui.prompt.classList.add('hidden');
-
-  // --- HUD
-  setText(ui.level, `ЯРУС −${G.level}`);
-  ui.batFill.style.width = P.battery.toFixed(1) + '%';
-  ui.batFill.style.background = P.battery < 20 ? '#e04b3a' : P.battery < 45 ? '#e8c547' : '#9fd36a';
-  setText(ui.batTxt, Math.ceil(P.battery) + '%');
-  setText(ui.score, `Хабар: ${G.lootScore} · ${G.bag.length} шт.`);
-  setText(ui.photo, `Фото: ${G.photos} (+${G.photoScore})`);
-  setText(ui.stance, P.crouch ? '🧎 крадёшься' : running ? '🏃 бежишь — шумно!' : '');
-  if (isTouch) $('btnLight').classList.toggle('on', P.light);
-}
-
-function updateGuard(g, dt) {
-  const dx = P.x - g.x, dy = P.y - g.y, d = Math.hypot(dx, dy), angTo = Math.atan2(dy, dx);
-  let range = P.light ? 8.5 : 4;
-  if (P.crouch) range *= 0.65;
-  let sees = false;
-  if (d < 14) {
-    const inCone = Math.abs(angDiff(g.a, angTo)) < 0.6;
-    let cond = d < (P.crouch ? 0.9 : 1.2) || (inCone && d < range) || (P.light && d < 2.6);
-    if (!cond && P.light && d < 9 && Math.abs(angDiff(P.a, angTo + Math.PI)) < 0.45) cond = true; // светишь в лицо
-    if (cond) sees = los(g.x, g.y, P.x, P.y);
-  }
-  g.sees = sees;
-  if (sees) {
-    const rate = d < 2 ? 3 : 0.75 + 2.1 * (1 - Math.min(d, range) / range);
-    g.susp = Math.min(1.2, g.susp + rate * dt * (P.running ? 1.4 : 1));
-    g.lastX = P.x; g.lastY = P.y;
-  } else if (g.state !== 'chase') g.susp = Math.max(0, g.susp - dt * 0.18);
-
-  if (sees && g.susp >= 1 && g.state !== 'chase') {
-    g.state = 'chase'; g.repath = 0; g.lost = 0; SFX.alert(); G.shake = 0.25;
-    msg(pick(['«Стоять! Охрана!»', '«Эй, ты! А ну стой!»', '«Опять диггеры, мать их!»', '«Стой, стрелять буду!» (не будет)']), 'bad');
-  } else if (sees && g.state === 'patrol' && g.susp > 0.3) investigate(g, P.x, P.y, 3);
-  else if (sees && g.state === 'investigate') {
-    g.retarget = (g.retarget || 0) - dt;
-    if (g.retarget <= 0) { g.retarget = 0.6; g.timer = 3; g.path = findPath(g.x, g.y, P.x, P.y); }
-  }
-
-  let speed = 0.85 + G.level * 0.04, targetAng = null;
-  if (g.state === 'chase') {
-    speed = 2.2 + G.level * 0.06;
-    g.repath -= dt;
-    if (sees) {
-      g.lost = 0;
-      if (g.repath <= 0) { g.path = findPath(g.x, g.y, P.x, P.y); g.repath = 0.3; }
-      targetAng = angTo;
-      if (!g.path.length) { g.x += Math.cos(angTo) * speed * dt; g.y += Math.sin(angTo) * speed * dt; }
-    } else {
-      g.lost += dt;
-      if (g.repath <= 0) { g.path = findPath(g.x, g.y, g.lastX, g.lastY); g.repath = 1; }
-      if ((!g.path.length && g.lost > 0.5) || g.lost > 7) {
-        g.state = 'investigate'; g.timer = 4; g.susp = 0.7; g.path = []; g.lookBase = g.a;
-        msg('Охранник потерял тебя из виду…', 'info');
-      }
-    }
-  } else if (g.state === 'investigate') {
-    speed = 1.25 + G.level * 0.05;
-    if (!g.path.length) { g.timer -= dt; if (g.timer <= 0) { g.state = 'patrol'; g.wait = 1; g.susp = Math.min(g.susp, 0.25); } }
-  } else if (!g.path.length) {
-    g.wait -= dt;
-    if (g.wait <= 0) {
-      const r = pick(G.rooms);
-      g.path = findPath(g.x, g.y, r.cx + ri(-1, 1) + 0.5, r.cy + ri(-1, 1) + 0.5);
-      if (!g.path.length) g.path = findPath(g.x, g.y, r.cx + 0.5, r.cy + 1.5);
-      g.wait = 1 + Math.random() * 2.5; g.lookBase = g.a;
-    }
-  }
-
-  let moved = false;
-  if (g.path.length) {
-    const [tx, ty] = g.path[0], cx = tx + 0.5, cy = ty + 0.5;
-    const ddx = cx - g.x, ddy = cy - g.y, dd = Math.hypot(ddx, ddy);
-    const step = speed * dt * (tileAt(g.x, g.y) === WATER ? 0.7 : 1);
-    if (dd <= step) { g.x = cx; g.y = cy; g.path.shift(); } else { g.x += ddx / dd * step; g.y += ddy / dd * step; }
-    if (targetAng === null && dd > 0.01) targetAng = Math.atan2(ddy, ddx);
-    moved = true; g.lookBase = targetAng;
-    g.walk += dt * speed * 6;
-    g.stepT = (g.stepT || 0) - dt * speed;
-    if (g.stepT <= 0) {
-      g.stepT = 0.45;
-      if (d < 10) {
-        const v = (1 - d / 10) * (g.state === 'chase' ? 0.16 : 0.08);
-        sndNoise(0.07, { vol: Math.max(0.004, v), freq: 240, q: 0.9, pan: Math.sin(angDiff(P.a, angTo + Math.PI)) });
-      }
-    }
-  }
-  if (targetAng === null) targetAng = g.lookBase + Math.sin(G.time * 1.3 + g.seed) * 1.1;
-  const rot = g.state === 'chase' ? 8 : moved ? 4.5 : 2;
-  g.a += clamp(angDiff(g.a, targetAng), -rot * dt, rot * dt);
-
-  if (d < 0.5) { caughtBy = g; caughtT = 0; SFX.alert(); msg('«Попался, голубчик!»', 'bad'); }
-}
-
-function updateRat(r, dt) {
-  const d = dist(r.x, r.y, P.x, P.y);
-  r.cd -= dt;
-  if (d < 2.2) {
-    r.a = Math.atan2(r.y - P.y, r.x - P.x) + (Math.random() - 0.5) * 0.8; r.sp = 2.4;
-    if (r.cd <= 0) {
-      r.cd = 5; SFX.squeak(Math.sin(angDiff(P.a, Math.atan2(r.y - P.y, r.x - P.x)))); makeNoise(r.x, r.y, 5);
-      if (Math.random() < 0.3) msg('Пи-пи! Крыса разбежалась — шумно…', 'info');
-    }
-  } else {
-    r.t -= dt;
-    if (r.t <= 0) { r.t = 0.5 + Math.random() * 2; r.sp = Math.random() < 0.4 ? 0 : 0.6 + Math.random() * 0.6; r.a = Math.random() * 6.28; }
-  }
-  if (r.sp > 0) {
-    const nx = r.x + Math.cos(r.a) * r.sp * dt, ny = r.y + Math.sin(r.a) * r.sp * dt;
-    if (canStand(nx, r.y, 0.1)) r.x = nx; else r.a = Math.PI - r.a;
-    if (canStand(r.x, ny, 0.1)) r.y = ny; else r.a = -r.a;
-  }
-}
-
-// ============================================================
-//  Синхронизация 3D
-// ============================================================
-const tmpV = new THREE.Vector3(), camFwd = new THREE.Vector3();
-function sync3D(dt) {
-  // камера
-  const bobA = P.moving ? (P.running ? 0.06 : 0.035) : 0;
-  const sh = (G.shake || 0) * 0.08;
-  camera.position.set(w(P.x) + (Math.random() - .5) * sh, P.eyeY + Math.sin(P.bob) * bobA + (Math.random() - .5) * sh, w(P.y));
-  camera.rotation.set(P.pitch, P.yaw + Math.cos(P.bob * 0.5) * bobA * 0.15, 0);
-  const fovT = P.running ? 80 : 72;
-  if (Math.abs(camera.fov - fovT) > 0.1) { camera.fov += (fovT - camera.fov) * Math.min(1, dt * 5); camera.updateProjectionMatrix(); }
-  camera.getWorldDirection(camFwd);
-  updateVisibility();
-
-  // фонарь в руке
-  handFL.position.set(0.17 + Math.cos(P.bob * 0.5) * bobA * 0.3, -0.17 + Math.abs(Math.sin(P.bob * 0.5)) * bobA * 0.4, -0.42);
-  let flick = 1;
-  if (P.battery < 15) flick = Math.random() < 0.08 ? 0.2 : 0.75 + Math.random() * 0.25;
-  else if (P.battery < 30) flick = 0.88 + Math.random() * 0.08;
-  const strength = P.light ? (0.45 + 0.55 * Math.min(1, P.battery / 60)) * flick : 0;
-  // вспышка фотоаппарата = короткое усиление фонаря (без отдельного источника света)
-  flashlight.intensity = 72 * strength + G.flash * 600;
-  flashlight.angle = 0.46 + G.flash * 0.6;
-  if (fill) fill.intensity = 1.2 * strength + G.flash * 6;
-  handFL.lens.emissiveIntensity = 1.5 * strength;
-
-  // лампы: ближайшие получают настоящий свет
-  lampTimer -= dt;
-  const lamps = G.lamps.filter(L => !L.moon);
-  if (lampTimer <= 0) {
-    lampTimer = 0.25;
-    const lk = L => dist(L.x, L.y, P.x, P.y) + (vis.pointVisible(L.x, L.y) ? 0 : 30); // свет — тем лампам, что в поле зрения
-    lamps.sort((a, b) => lk(a) - lk(b));
-    lampPool.forEach((l, i) => { l.userData.lamp = lamps[i] || null; if (lamps[i]) { l.position.copy(lamps[i].world); l.color.copy(lamps[i].color); } });
-  }
-  for (const L of lamps) if (L.bulb) L.bulb.emissiveIntensity = L.on ? 2.5 * (0.9 + 0.1 * Math.sin(G.time * 13 + L.x)) : 0.05;
-  for (const l of lampPool) { const L = l.userData.lamp; l.intensity = L && L.on ? 5 * (0.9 + 0.1 * Math.sin(G.time * 13 + L.x)) : 0; }
-
-  // вода
-  if (world && world.waterMesh) { const b = world.waterMesh.material.bumpMap || world.waterMesh.material.map; if (b) { b.offset.x = G.time * 0.03; b.offset.y = Math.sin(G.time * 0.4) * 0.05; } }
-
-  // охрана
-  for (const g of G.guards) g.seen = vis.pointVisible(g.x, g.y) || vis.pointVisible(g.x + Math.cos(g.a) * 5, g.y + Math.sin(g.a) * 5);
-  const gk = g => dist(g.x, g.y, P.x, P.y) + (g.seen ? 0 : 30);
-  const byDist = [...G.guards].sort((a, b) => gk(a) - gk(b));
-  guardSpotPool.forEach((l, i) => { l.userData.g = byDist[i] || null; });
-  for (const g of G.guards) {
-    const m = g.mesh, u = m.userData;
-    m.visible = g.seen;
-    if (!g.seen) continue; // за стенами — не рисуем и не анимируем
-    m.position.set(w(g.x), 0, w(g.y)); m.rotation.y = -g.a;
-    const swing = g.path.length ? Math.sin(g.walk) * 0.55 : 0;
-    u.legL.rotation.z = swing; u.legR.rotation.z = -swing; u.armL.rotation.z = -swing * 0.6;
-    const chase = g.state === 'chase';
-    u.beam.material.color.setHex(chase ? 0xffb090 : 0xfff0c0);
-    u.beam.material.opacity = chase ? 0.16 : 0.1;
-  }
-  for (const l of guardSpotPool) {
-    const g = l.userData.g;
-    if (!g) { l.intensity = 0; continue; }
-    const ca = Math.cos(g.a), sa = Math.sin(g.a);
-    l.position.set(w(g.x) + ca * 0.6 - sa * 0.3, 1.45, w(g.y) + sa * 0.6 + ca * 0.3);
-    l.target.position.set(w(g.x) + ca * 8, 0.2, w(g.y) + sa * 8);
-    l.color.setHex(g.state === 'chase' ? 0xffc4a0 : 0xfff2c8);
-    l.intensity = 70;
-  }
-
-  // крысы
-  for (const r of G.rats) { const v = vis.pointVisible(r.x, r.y); r.mesh.visible = v; if (v) { r.mesh.position.set(w(r.x), 0, w(r.y)); r.mesh.rotation.y = -r.a; } }
-
-  // блики на предметах, освещённых фонарём
-  for (const it of G.items) {
-    const v = vis.pointVisible(it.x, it.y); it.mesh.visible = v;
-    if (!v) continue;
-    const gl = it.mesh.userData.glint;
-    tmpV.set(w(it.x) - camera.position.x, 0.3 - camera.position.y, w(it.y) - camera.position.z);
-    const dd = tmpV.length(); tmpV.divideScalar(dd);
-    const lit = P.light && dd < 16 && tmpV.dot(camFwd) > 0.9;
-    const tw = (Math.sin(G.time * 3 + it.ph) + 1) / 2;
-    gl.material.opacity = lit ? 0.35 + 0.65 * tw * tw : 0;
-    gl.material.rotation = G.time;
-  }
-
-  // пыль: светится только в луче фонаря
-  if (dust) {
-    const pos = dust.geometry.attributes.position, col = dust.geometry.attributes.color;
-    const cx = camera.position.x, cz = camera.position.z;
-    for (let i = 0; i < pos.count; i++) {
-      let x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-      x += Math.sin(G.time * 0.3 + i) * dt * 0.05; y += Math.cos(G.time * 0.2 + i * 1.3) * dt * 0.04; z += Math.cos(G.time * 0.25 + i * 0.7) * dt * 0.05;
-      if (x - cx > 6) x -= 12; if (x - cx < -6) x += 12; if (z - cz > 6) z -= 12; if (z - cz < -6) z += 12;
-      if (y < 0) y += WH; if (y > WH) y -= WH;
-      pos.setXYZ(i, x, y, z);
-      tmpV.set(x - cx, y - camera.position.y, z - cz); const dd = tmpV.length(); tmpV.divideScalar(dd || 1);
-      const c = P.light && dd < 7 ? Math.max(0, (tmpV.dot(camFwd) - 0.9) * 10) * (1 - dd / 7) * strength : 0;
-      col.setXYZ(i, c, c * 0.95, c * 0.85);
-    }
-    pos.needsUpdate = true; col.needsUpdate = true;
-  }
-
-  // экранные эффекты
-  ui.red.style.opacity = (G.chaseT * (0.6 + 0.4 * Math.sin(G.time * 11))).toFixed(3);
-}
-
-// ============================================================
-//  Миникарта
-// ============================================================
-function drawMinimap() {
-  const c = ui.mini;
-  ui.mini.classList.toggle('hidden', !G.showMap || G.state !== 'play');
-  if (!G.showMap) return;
-  const s = 3; if (c.width !== MW * s) { c.width = MW * s; c.height = MH * s; }
-  const g = miniCtx; g.clearRect(0, 0, c.width, c.height);
-  for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) {
-    const i = y * MW + x; if (!G.explored[i]) continue;
-    const t = G.map[i];
-    g.fillStyle = t === 0 ? '#6a665a' : t === WATER ? '#2b5560' : t === EXIT ? '#6cf' : t === DOWN ? '#fc5' : t === 6 ? '#3e3a32' : '#2c2a25';
-    g.fillRect(x * s, y * s, s, s);
-  }
-  g.fillStyle = '#e8c547'; g.beginPath(); g.arc(P.x * s, P.y * s, 3.5, 0, 7); g.fill();
-  g.strokeStyle = '#e8c547'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(P.x * s, P.y * s); g.lineTo((P.x + Math.cos(P.a) * 3) * s, (P.y + Math.sin(P.a) * 3) * s); g.stroke();
-  for (const gu of G.guards) if (gu.state === 'chase' || gu.sees) { g.fillStyle = '#ff4a3a'; g.fillRect(gu.x * s - 3, gu.y * s - 3, 6, 6); }
-}
+window.addEventListener('resize', resize);
+resize();
 
 // ============================================================
 //  Главный цикл
 // ============================================================
-let last = performance.now(), idleT = 0;
+const FPS = { frames: 0, acc: 0 };
+let last = performance.now(), idleT = 0, uiT = 0;
 function frame(now) {
-  const rawDt = (now - last) / 1000, dt = Math.min(0.05, rawDt); last = now;
-  updateFPS(rawDt);
-  if (G.state === 'play') update(dt);
-  // в игре — каждый кадр; на паузе, в меню и на финальном экране картинка стоит,
-  // поэтому перерисовываем её редко и не грузим видеокарту впустую
-  const live = G.state === 'play' || G.state === 'trans';
-  idleT -= rawDt;
-  if (live || idleT <= 0) {
-    idleT = 0.5;
-    if (world) sync3D(dt);
+  const rawDt = Math.min(0.25, (now - last) / 1000), dt = Math.min(0.05, rawDt); last = now;
+  FPS.frames++; FPS.acc += rawDt;
+  if (FPS.acc >= 0.5) { $('fps').textContent = `${Math.round(FPS.frames / FPS.acc)} FPS · ${canvas.width}×${canvas.height}${PERF ? ' · ⚡' : ''}`; FPS.frames = 0; FPS.acc = 0; }
+
+  if (state === 'play') {
+    const sdt = physPaused ? 0 : dt * timeScale;
+    if (firing && tool === 'gun') { fireCD -= dt; if (fireCD <= 0) { shoot(); fireCD = 0.14; } }
+    updateGrab();
+    if (sdt > 0) physicsStep(sdt);
+    for (let i = later.length - 1; i >= 0; i--) { const l = later[i]; l.t -= sdt; if (l.t <= 0) { later.splice(i, 1); l.fn(); } }
+    if (sdt > 0) updateObjects(sdt);
+    syncMeshes();
+    fxAdd.update(sdt); fxNorm.update(sdt);
+    if (expLight && expLight.intensity > 0) expLight.intensity = Math.max(0, expLight.intensity - dt * 300);
+    updateCamera(dt);
+    // упавших далеко вниз (не должно случаться) — убираем
+    uiT -= dt;
+    if (uiT <= 0) {
+      uiT = 0.25; updateCounters();
+      for (const rd of rags.slice()) if (rd.pelvis.position.y < -20) removeRagdoll(rd);
+      for (const o of objs.slice()) if (o.body.position.y < -20) removeObj(o);
+    }
+    if (mouseMoved || uiT === 0.25) { updateTip(); mouseMoved = false; }
+    if (toastT > 0) { toastT -= dt; if (toastT <= 0) $('toast').classList.remove('show'); }
     renderer.render(scene, camera);
+  } else {
+    // меню: картинка стоит — перерисовываем редко, не грузим видеокарту
+    idleT -= rawDt;
+    if (idleT <= 0) { idleT = 0.5; updateCamera(0); syncMeshes(); renderer.render(scene, camera); }
   }
-  miniTimer -= dt;
-  if (miniTimer <= 0 && world) { miniTimer = 0.15; drawMinimap(); }
   requestAnimationFrame(frame);
 }
+resetScene();
+updateCamera(0);
 requestAnimationFrame(frame);
 
-// Отладка / автотесты
-window.__digger = { G, P, startRun, interact, update, sync3D, vis, getWorld: () => world, THREE, renderer, scene, camera };
+window.__rag = { physicsStep, world, rags, objs, pins, scene, camera, renderer, spawnRagdoll, spawnCrate, spawnBarrel, spawnBomb, explode, shoot, setTool, useTool, mouse, cam, resetScene, clearAll, closeMenu, get state() { return state; }, THREE, CANNON };
