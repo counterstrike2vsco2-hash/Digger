@@ -1,14 +1,15 @@
 {
-  "name": "digger-bombar-3d",
+  "name": "ragdoll-sandbox-3d",
   "private": true,
-  "version": "2.0.0",
-  "description": "ДИГГЕР: Бомбарь 3D — стелс от первого лица в заброшенном советском бомбоубежище",
+  "version": "3.0.0",
+  "description": "Рэгдолл Песочница 3D — физическая песочница с человечками в браузере (three.js + cannon-es)",
   "type": "module",
   "scripts": {
-    "build": "esbuild src/main.js --bundle --minify --format=esm --target=es2020 --outfile=js/digger3d.js",
-    "watch": "esbuild src/main.js --bundle --format=esm --target=es2020 --outfile=js/digger3d.js --watch"
+    "build": "esbuild src/main.js --bundle --minify --format=esm --target=es2020 --outfile=js/ragdoll3d.js",
+    "watch": "esbuild src/main.js --bundle --format=esm --target=es2020 --outfile=js/ragdoll3d.js --watch"
   },
   "devDependencies": {
+    "cannon-es": "^0.20.0",
     "esbuild": "^0.25.0",
     "three": "^0.187.0"
   }

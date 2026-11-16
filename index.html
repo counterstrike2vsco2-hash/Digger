@@ -1,112 +1,66 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="theme-color" content="#0a0a0a">
-<meta name="description" content="ДИГГЕР: Бомбарь 3D — стелс от первого лица. Лезь в заброшенное советское бомбоубежище, собирай хабар, фоткай и не попадись ЧОПу.">
-<title>ДИГГЕР: Бомбарь 3D</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Рэгдолл Песочница 3D</title>
+<meta name="description" content="Физическая 3D-песочница с рэгдолл-человечками: хватай, кидай, взрывай. Работает в браузере, есть режим производительности для слабых ПК.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <canvas id="game"></canvas>
 
-<!-- экранные эффекты -->
-<div id="vignette"></div>
-<div id="grain"></div>
-<div id="redOverlay"></div>
-<div id="flashOverlay"></div>
-<div id="crosshair"></div>
-
 <!-- HUD -->
 <div id="hud" class="hidden">
-  <div class="panel">
-    <div id="hLevel">ЯРУС −1</div>
-    <div class="bat"><span class="ico">🔦</span><div class="batbar"><div id="batFill"></div></div><span id="batTxt">100%</span></div>
-    <div id="hScore">Хабар: 0</div>
-    <div id="hPhoto">Фото: 0</div>
-    <div id="hStance"></div>
+  <div id="topLeft">
+    <div class="logo">РЭГДОЛЛ <span>ПЕСОЧНИЦА</span></div>
+    <div id="counters"></div>
+    <div id="flags"></div>
   </div>
-  <div id="fps"></div>
-  <div id="roomName"></div>
+  <div id="help">
+    <b>Управление</b> <span class="dim">(H — скрыть)</span><br>
+    <kbd>ЛКМ</kbd> инструмент · <kbd>ПКМ</kbd> крутить камеру · <kbd>Колесо</kbd> зум<br>
+    <kbd>WASD</kbd> двигать камеру · <kbd>Q</kbd>/<kbd>E</kbd> ниже/выше · <kbd>СКМ</kbd> сдвиг<br>
+    <kbd>1</kbd>–<kbd>0</kbd> инструменты · <kbd>T</kbd> замедление · <kbd>G</kbd> гравитация<br>
+    <kbd>P</kbd> пауза физики · <kbd>R</kbd> сброс · <kbd>Del</kbd> очистить · <kbd>Esc</kbd> меню · <kbd>Ё</kbd> FPS
+  </div>
+  <div id="toolHint"></div>
+  <div id="hotbar"></div>
 </div>
-<canvas id="minimap" class="hidden"></canvas>
-<div id="prompt" class="hidden"></div>
-<div id="log"></div>
-<div id="lockHint" class="hidden">Кликни, чтобы управлять мышью</div>
-
-<!-- Тач-управление -->
-<div id="touch" class="hidden">
-  <div id="joyBase"><div id="joyKnob"></div></div>
-  <div id="tbtns">
-    <button id="btnLight">🔦</button>
-    <button id="btnAct">📷</button>
-    <button id="btnRun">БЕГ</button>
-    <button id="btnCrouch">🧎</button>
-  </div>
-  <div id="tTop">
-    <button id="btnMap">🗺</button>
-    <button id="btnPause">❚❚</button>
-  </div>
-</div>
+<div id="tip" class="hidden"></div>
+<div id="toast"></div>
+<div id="fps" class="hidden"></div>
 
 <!-- Меню -->
 <div id="menu" class="screen">
   <div class="box">
-    <div class="stencil">ОБЪЕКТ ГО № 4-17 · ВХОД ВОСПРЕЩЁН</div>
-    <h1>ДИГГЕР</h1>
-    <h2>БОМБАРЬ <span class="d3">3D</span></h2>
-    <p class="story">Ночь. Заброшенный завод «Красный Октябрь». Под цехом №4 — бомбоубежище гражданской обороны, закрытое с 1991 года. Говорят, там всё осталось как было: противогазы, дозиметры, журналы дежурств… Ты нашёл открытую вентшахту.</p>
-    <ul class="rules">
-      <li>🎒 Собирай <b>хабар</b> и <b>фоткай</b> плакаты, гермодвери, мозаики.</li>
-      <li>👮 По бомбарю шарится <b>ЧОП</b> с фонарями. Поймает — отберёт весь хабар.</li>
-      <li>🔦 Фонарь садится. Выключай его и <b>крадись</b>, чтобы прятаться в темноте.</li>
-      <li>⬇ Чем глубже ярус — тем жирнее хабар и злее охрана.</li>
-      <li>🪜 Вылезай через <b>люк</b> с лунным светом, чтобы засчитать вылазку.</li>
-    </ul>
-    <div class="controls desk">
-      <span><kbd>WASD</kbd> идти</span><span><kbd>Мышь</kbd> смотреть</span><span><kbd>Shift</kbd> бег (шумно)</span><span><kbd>C</kbd> присесть</span>
-      <span><kbd>F</kbd> фонарь</span><span><kbd>E</kbd>/<kbd>ЛКМ</kbd> фото / действие</span><span><kbd>M</kbd> карта</span><span><kbd>Esc</kbd> пауза</span>
+    <h1>РЭГДОЛЛ<br><span>ПЕСОЧНИЦА 3D</span></h1>
+    <p class="story">Физическая песочница с человечками. Хватай их рукой и кидай, подбрасывай на батутах, прибивай гвоздями,
+      взрывай бочками и бомбами, стреляй из пистолета и базуки. Человечки держат равновесие, падают от ударов, приходят в себя и встают.</p>
+    <div class="tools">✋ Рука · 🧍 Человечек · 📦 Ящик · 🛢️ Бочка · 💣 Бомба · 🔫 Пистолет · 🚀 Базука · 🟦 Батут · 📌 Гвоздь · 🧽 Ластик</div>
+    <div class="controls">
+      <span><kbd>ЛКМ</kbd> инструмент</span><span><kbd>ПКМ</kbd> камера</span><span><kbd>Колесо</kbd> зум</span><span><kbd>WASD</kbd> двигаться</span>
+      <span><kbd>1</kbd>–<kbd>0</kbd> выбор</span><span><kbd>T</kbd> замедление</span><span><kbd>G</kbd> гравитация</span><span><kbd>Del</kbd> очистить</span>
     </div>
-    <div class="controls mob">Левая половина экрана — идти, правая — смотреть. Кнопки: фонарь, фото/действие, бег, присесть.</div>
-    <label id="perfRow"><input type="checkbox" id="optPerf"> <b>⚡ Режим производительности</b> <span>для слабых ПК: проще свет, без теней, меньше мелочей. Разрешение не снижается</span></label>
+
+    <label id="perfRow"><input type="checkbox" id="optPerf"> <b>⚡ Режим производительности</b> <span>для слабых ПК: простое освещение, без теней и сглаживания, меньше частиц. Разрешение не снижается</span></label>
     <div id="quality">Графика:
       <button data-q="auto">Авто</button><button data-q="low">Низкая</button><button data-q="medium">Средняя</button><button data-q="high">Высокая</button>
     </div>
     <div id="gpuInfo"></div>
     <div id="opts">
+      <label><input type="checkbox" id="optBlood"> Кровь</label>
+      <label><input type="checkbox" id="optDism"> Отрыв конечностей</label>
+      <label><input type="checkbox" id="optGetup"> Человечки встают</label>
       <label><input type="checkbox" id="optFPS"> Показывать FPS <kbd>Ё</kbd></label>
     </div>
-    <button id="btnStart" class="big">ЛЕЗТЬ В БОМБАРЬ</button>
-    <div id="best"></div>
-    <div class="alt"><a href="2d/">Старая 2D-версия</a></div>
+    <div class="btns">
+      <button id="btnPlay" class="big">ИГРАТЬ</button>
+      <button id="btnReset">Сбросить сцену</button>
+    </div>
   </div>
 </div>
 
-<!-- Пауза -->
-<div id="pause" class="screen hidden">
-  <div class="box small">
-    <h2>ПАУЗА</h2>
-    <p>Затаился в углу и слушаешь, как капает вода…</p>
-    <button id="btnResume" class="big">ПРОДОЛЖИТЬ</button>
-    <button id="btnQuit">Сдаться и вылезти (хабар сохранится)</button>
-  </div>
-</div>
-
-<!-- Конец -->
-<div id="end" class="screen hidden">
-  <div class="box">
-    <h1 id="endTitle">ВЫЛАЗКА УДАЛАСЬ</h1>
-    <p id="endText"></p>
-    <div id="endStats"></div>
-    <div id="endBag"></div>
-    <button id="btnAgain" class="big">ЕЩЁ ВЫЛАЗКА</button>
-    <button id="btnMenu">В меню</button>
-  </div>
-</div>
-
-<div id="trans" class="hidden"><div id="transText"></div></div>
-<noscript><p style="color:#fff;text-align:center">Для игры нужен JavaScript и WebGL.</p></noscript>
-<script type="module" src="js/digger3d.js"></script>
+<script type="module" src="js/ragdoll3d.js"></script>
 </body>
 </html>
