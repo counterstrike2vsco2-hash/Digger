@@ -159,3 +159,9 @@ h2 .d3 { color: #e8c547; letter-spacing: 4px; }
 #tbtns #btnRun { grid-column: 1; grid-row: 2; }
 #tbtns #btnCrouch { grid-column: 1 / span 2; grid-row: 3; width: 152px; height: 52px; border-radius: 26px; font-size: 22px; }
 body.touch #crosshair { opacity: .6; }
+
+#gpuInfo { font-size: 11px; color: #7d786a; margin: 2px 0 6px; }
+#opts { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 16px; font-size: 12px; color: #9a9585; margin-bottom: 6px; }
+#opts label { cursor: pointer; }
+#opts input { accent-color: #e8c547; vertical-align: middle; }
+#fps { margin-top: 6px; font-size: 11px; color: #9fd36a; text-shadow: 0 0 4px #000; }

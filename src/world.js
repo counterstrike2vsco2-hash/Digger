@@ -2,6 +2,8 @@
 import * as THREE from 'three';
 import { MW, MH, WALL, FLOOR, WATER, DOOR, EXIT, DOWN, PROP, G, ROOM_TYPES, mulberry32 } from './level.js';
 import { floorMaterial, wallMaterial, ceilingMaterial, waterMaterial, M, faceMaterial, spotTexture, labelTexture, beamTexture } from './textures.js';
+import { QP, stdMat } from './quality.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 export const S = 2;      // размер тайла в метрах
 export const WH = 3;     // высота потолка
@@ -39,6 +41,8 @@ class GeoBuilder {
   }
   get empty() { return this.idx.length === 0; }
 }
+
+let FIX_GLASS = null, WHEEL_MAT = null, RAIL_MAT = null;
 
 // ---------- общие геометрии ----------
 const GEO = {};
@@ -145,11 +149,11 @@ function makeHermo() { // гермодверь в стене
   const g = new THREE.Group();
   g.add(mesh(boxG(1.9, 2.4, 0.15), M.darkMetal(), 0, 1.2, 0.02));
   const door = mesh(boxG(1.5, 2.1, 0.22), M.greyMetal(), 0, 1.07, 0.12); g.add(door);
-  const wheel = new THREE.Mesh(geo('torus', () => new THREE.TorusGeometry(0.32, 0.035, 10, 32)), new THREE.MeshStandardMaterial({ color: 0x8a1d14, roughness: 0.5, metalness: 0.4 }));
+  const wheel = new THREE.Mesh(geo('torus', () => new THREE.TorusGeometry(0.32, 0.035, 10, 32)), WHEEL_MAT || (WHEEL_MAT = stdMat({ color: 0x8a1d14, roughness: 0.5, metalness: 0.4 })));
   wheel.position.set(0, 1.15, 0.28); wheel.castShadow = true; g.add(wheel);
   for (let k = 0; k < 3; k++) { const sp = mesh(boxG(0.64, 0.04, 0.04), wheel.material, 0, 1.15, 0.28); sp.rotation.z = k * Math.PI / 3; g.add(sp); }
   for (const y of [0.45, 1.75]) g.add(mesh(boxG(0.5, 0.12, 0.12), M.steel(), 0.62, y, 0.26));
-  const lbl = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.35), new THREE.MeshStandardMaterial({ map: labelTexture('ЗД-1', '#3a3f42', '#e8c547'), roughness: 0.7 }));
+  const lbl = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.35), stdMat({ map: labelTexture('ЗД-1', '#3a3f42', '#e8c547'), roughness: 0.7 }));
   lbl.position.set(0, 1.85, 0.235); g.add(lbl);
   return g;
 }
@@ -162,15 +166,19 @@ function makeLadder(h) {
 }
 
 // ---------- построение мира ----------
-export function buildWorld(scene, quality) {
+export function buildWorld(scene) {
   const group = new THREE.Group();
   const map = G.map, zone = G.zone;
   const isWall = (x, y) => (x < 0 || y < 0 || x >= MW || y >= MH) ? true : map[y * MW + x] === WALL;
   const r = mulberry32(G.levelSeed ^ 0x5bd1e995);
 
-  const floors = {}, walls = {}, ceil = new GeoBuilder(), water = new GeoBuilder(), lintel = new GeoBuilder(), shaft = new GeoBuilder(), pit = new GeoBuilder();
-  const fb = k => floors[k] || (floors[k] = new GeoBuilder());
-  const wb = k => walls[k] || (walls[k] = new GeoBuilder());
+  const floors = {}, walls = {}, water = new GeoBuilder(), lintel = new GeoBuilder(), shaft = new GeoBuilder(), pit = new GeoBuilder();
+  // геометрия режется на куски CH×CH тайлов: работает отсечение по камере и сортировка спереди-назад
+  const CH = 16, ck = (x, y) => Math.floor(x / CH) + ',' + Math.floor(y / CH);
+  const ceils = {};
+  const fb = (k, x, y) => { const key = k + '|' + ck(x, y); return floors[key] || (floors[key] = new GeoBuilder()); };
+  const wb = (k, x, y) => { const key = k + '|' + ck(x, y); return walls[key] || (walls[key] = new GeoBuilder()); };
+  const cb = (x, y) => { const key = ck(x, y); return ceils[key] || (ceils[key] = new GeoBuilder()); };
   const U = 1 / (2 * S); // одна текстура на 2 тайла
 
   for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) {
@@ -183,7 +191,7 @@ export function buildWorld(scene, quality) {
         if (isWall(x + dx, y + dy)) continue;
         const nz = zone[(y + dy) * MW + x + dx];
         const rt = nz >= 0 ? G.rooms[nz].type : null;
-        const b = wb(rt === 'med' || rt === 'wc' ? 1 : 0);
+        const b = wb(rt === 'med' || rt === 'wc' ? 1 : 0, x, y);
         if (dy === 1) b.quad([[x0, 0, z1], [x1, 0, z1], [x1, WH, z1], [x0, WH, z1]], [0, 0, 1], [[x0 * U, 0], [x1 * U, 0], [x1 * U, 1], [x0 * U, 1]]);
         else if (dy === -1) b.quad([[x1, 0, z0], [x0, 0, z0], [x0, WH, z0], [x1, WH, z0]], [0, 0, -1], [[-x1 * U, 0], [-x0 * U, 0], [-x0 * U, 1], [-x1 * U, 1]]);
         else if (dx === 1) b.quad([[x1, 0, z1], [x1, 0, z0], [x1, WH, z0], [x1, WH, z1]], [1, 0, 0], [[-z1 * U, 0], [-z0 * U, 0], [-z0 * U, 1], [-z1 * U, 1]]);
@@ -192,14 +200,14 @@ export function buildWorld(scene, quality) {
       continue;
     }
     // потолок
-    if (t !== EXIT) ceil.quad([[x0, WH, z0], [x1, WH, z0], [x1, WH, z1], [x0, WH, z1]], [0, -1, 0], [[x0 * U, z0 * U], [x1 * U, z0 * U], [x1 * U, z1 * U], [x0 * U, z1 * U]]);
+    if (t !== EXIT) cb(x, y).quad([[x0, WH, z0], [x1, WH, z0], [x1, WH, z1], [x0, WH, z1]], [0, -1, 0], [[x0 * U, z0 * U], [x1 * U, z0 * U], [x1 * U, z1 * U], [x0 * U, z1 * U]]);
     if (t === DOWN) continue;
     // пол
     const z = zone[i];
     let style = z >= 0 ? ROOM_TYPES[G.rooms[z].type].floor : 'corridor';
     if (t === DOOR) style = 'door';
     const fuv = style === 'door' ? 1 / S : U;
-    fb(style).quad([[x0, 0, z0], [x0, 0, z1], [x1, 0, z1], [x1, 0, z0]], [0, 1, 0], [[x0 * fuv, -z0 * fuv], [x0 * fuv, -z1 * fuv], [x1 * fuv, -z1 * fuv], [x1 * fuv, -z0 * fuv]]);
+    fb(style, x, y).quad([[x0, 0, z0], [x0, 0, z1], [x1, 0, z1], [x1, 0, z0]], [0, 1, 0], [[x0 * fuv, -z0 * fuv], [x0 * fuv, -z1 * fuv], [x1 * fuv, -z1 * fuv], [x1 * fuv, -z0 * fuv]]);
     if (t === WATER) water.quad([[x0, 0.07, z0], [x0, 0.07, z1], [x1, 0.07, z1], [x1, 0.07, z0]], [0, 1, 0], [[x0 * U, z0 * U], [x0 * U, z1 * U], [x1 * U, z1 * U], [x1 * U, z0 * U]]);
     if (t === DOOR) lintel.box(x0, 2.35, z0, x1, WH, z1, 0.5);
   }
@@ -222,12 +230,12 @@ export function buildWorld(scene, quality) {
   }
 
   const add = (b, m, cast = true) => { if (b.empty) return null; const o = new THREE.Mesh(b.build(), m); o.receiveShadow = true; o.castShadow = cast; group.add(o); return o; };
-  for (const k in floors) add(floors[k], floorMaterial(k), false);
-  for (const k in walls) add(walls[k], wallMaterial(+k));
-  add(ceil, ceilingMaterial(), false);
+  for (const k in floors) add(floors[k], floorMaterial(k.split('|')[0]), false);
+  for (const k in walls) add(walls[k], wallMaterial(+k.split('|')[0]));
+  for (const k in ceils) add(ceils[k], ceilingMaterial(), false);
   add(lintel, M.greyMetal());
   add(shaft, M.rust(), false);
-  add(pit, new THREE.MeshStandardMaterial({ color: 0x15130f, roughness: 1, map: wallMaterial(0).map }), false);
+  add(pit, stdMat({ color: 0x15130f, roughness: 1, map: wallMaterial(0).map }), false);
   const waterMesh = add(water, waterMaterial(), false);
   if (waterMesh) waterMesh.receiveShadow = true;
 
@@ -267,9 +275,9 @@ export function buildWorld(scene, quality) {
   {
     const openTiles = [];
     for (let i = 0; i < MW * MH; i++) if (map[i] === FLOOR) openTiles.push(i);
-    const nRocks = quality === 'low' ? 200 : 500;
+    const nRocks = QP.rocks, nPapers = QP.papers;
     const rocks = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0), floorMaterial('concrete'), nRocks);
-    const papers = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), M.white(), 120);
+    const papers = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), M.white(), nPapers);
     const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), sc = new THREE.Vector3(), p = new THREE.Vector3();
     for (let k = 0; k < nRocks; k++) {
       const i = openTiles[Math.floor(r() * openTiles.length)];
@@ -278,7 +286,7 @@ export function buildWorld(scene, quality) {
       e.set(r() * 6, r() * 6, r() * 6); q.setFromEuler(e); sc.set(s, s * (0.5 + r() * 0.5), s);
       m4.compose(p, q, sc); rocks.setMatrixAt(k, m4);
     }
-    for (let k = 0; k < 120; k++) {
+    for (let k = 0; k < nPapers; k++) {
       const i = openTiles[Math.floor(r() * openTiles.length)];
       p.set((i % MW + r()) * S, 0.01 + r() * 0.01, (Math.floor(i / MW) + r()) * S);
       e.set(-Math.PI / 2 + (r() - .5) * 0.2, 0, r() * 6); q.setFromEuler(e); sc.set(0.21, 0.297, 1);
@@ -287,6 +295,11 @@ export function buildWorld(scene, quality) {
     rocks.castShadow = true; rocks.receiveShadow = true; papers.receiveShadow = true;
     group.add(rocks, papers);
   }
+
+  // всё статичное ниже складывается в deco и в конце склеивается
+  const deco = new THREE.Group();
+  const groupAdd = group.add.bind(group);
+  group.add = (...objs) => { deco.add(...objs); return group; };
 
   // ---------- реквизит ----------
   for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) {
@@ -309,13 +322,13 @@ export function buildWorld(scene, quality) {
     const fx = (s.x + 0.5) * S, fz = (s.y + 1) * S;
     if (s.kind === 'hermo') {
       const o = makeHermo(); o.position.set(fx, 0, fz); group.add(o);
-      const pl = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.4), new THREE.MeshStandardMaterial({ map: spotTexture(s), transparent: true, alphaTest: 0.05 }));
+      const pl = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.4), stdMat({ map: spotTexture(s), transparent: true, alphaTest: 0.05 }));
       pl.position.set(fx, 1.2, fz + 0.01); group.add(pl);
       s.mesh = o;
       continue;
     }
     const big = s.kind === 'graffiti' ? [1.9, 1.9] : s.kind === 'slogan' ? [1.9, 1.9] : [1.25, 1.25];
-    const m = new THREE.MeshStandardMaterial({ map: spotTexture(s), transparent: true, alphaTest: 0.05, roughness: 0.85, polygonOffset: true, polygonOffsetFactor: -2 });
+    const m = stdMat({ map: spotTexture(s), transparent: true, alphaTest: 0.05, roughness: 0.85, polygonOffset: true, polygonOffsetFactor: -2 });
     const pl = new THREE.Mesh(new THREE.PlaneGeometry(big[0], big[1]), m);
     pl.position.set(fx, s.kind === 'graffiti' ? 1.3 : 1.65, fz + 0.012);
     pl.rotation.z = (r() - .5) * 0.06;
@@ -331,7 +344,7 @@ export function buildWorld(scene, quality) {
     const col = new THREE.Color(`rgb(${L.rgb})`);
     const fx = (L.wx + 0.5) * S, fz = (L.wy + 1) * S;
     const base = mesh(boxG(0.36, 0.22, 0.12), M.darkMetal(), fx, 2.45, fz + 0.06, false);
-    const bulbM = new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 2.5, roughness: 0.3 });
+    const bulbM = stdMat({ color: col, emissive: col, emissiveIntensity: 2.5, roughness: 0.3 });
     const bulb = mesh(boxG(0.28, 0.15, 0.1), bulbM, fx, 2.45, fz + 0.15, false);
     for (let k = -1; k <= 1; k++) group.add(mesh(boxG(0.015, 0.17, 0.02), M.darkMetal(), fx + k * 0.08, 2.45, fz + 0.21, false));
     group.add(base, bulb);
@@ -359,11 +372,11 @@ export function buildWorld(scene, quality) {
     const dx = (G.down.x + 0.5) * S, dz = (G.down.y + 0.5) * S;
     const bottom = new THREE.Mesh(new THREE.PlaneGeometry(S, S), M.hole()); bottom.rotation.x = -Math.PI / 2; bottom.position.set(dx, -4.99, dz); group.add(bottom);
     const lad = makeLadder(5.8); lad.position.set(dx, -5, dz - S / 2 + 0.12); group.add(lad);
-    const hz = new THREE.MeshStandardMaterial({ map: floorMaterial('door').map, roughness: 0.6 });
+    const hz = stdMat({ map: floorMaterial('door').map, roughness: 0.6 });
     for (const [x, z, w, d] of [[0, -S / 2, S + 0.2, 0.12], [0, S / 2, S + 0.2, 0.12], [-S / 2, 0, 0.12, S], [S / 2, 0, 0.12, S]]) group.add(mesh(boxG(w, 0.08, d), hz, dx + x, 0.04, dz + z, false));
     // ограждение
     for (const [x, z] of [[-S / 2, S / 2], [S / 2, S / 2]]) group.add(mesh(boxG(0.06, 1.0, 0.06), M.steel(), dx + x, 0.5, dz + z));
-    group.add(mesh(boxG(S, 0.05, 0.05), new THREE.MeshStandardMaterial({ color: 0xc9a634, roughness: 0.5 }), dx, 1.0, dz + S / 2));
+    group.add(mesh(boxG(S, 0.05, 0.05), RAIL_MAT || (RAIL_MAT = stdMat({ color: 0xc9a634, roughness: 0.5 })), dx, 1.0, dz + S / 2));
   }
 
   // ---------- мёртвые плафоны на потолке комнат ----------
@@ -372,12 +385,58 @@ export function buildWorld(scene, quality) {
     for (let k = 0; k < n; k++) {
       const x = (room.x + 1 + r() * (room.w - 2)) * S, z = (room.y + 1 + r() * (room.h - 2)) * S;
       group.add(mesh(cylG(0.25, 0.32, 0.18, 16), M.darkMetal(), x, WH - 0.09, z, false));
-      group.add(mesh(cylG(0.24, 0.24, 0.02, 16), new THREE.MeshStandardMaterial({ color: 0x6a6a60, roughness: 0.3 }), x, WH - 0.19, z, false));
+      group.add(mesh(cylG(0.24, 0.24, 0.02, 16), FIX_GLASS || (FIX_GLASS = stdMat({ color: 0x6a6a60, roughness: 0.3 })), x, WH - 0.19, z, false));
     }
   }
 
+  group.add = groupAdd;
+  mergeStatic(deco, group);
   scene.add(group);
   return { group, waterMesh, lampMeshes };
+}
+
+// ---------- склейка статики: сотни мешей → десятки ----------
+function sliceGeo(g, start, count) {
+  const out = new THREE.BufferGeometry();
+  for (const name of ['position', 'normal', 'uv']) {
+    const a = g.attributes[name], n = a.itemSize;
+    out.setAttribute(name, new THREE.Float32BufferAttribute(a.array.slice(start * n, (start + count) * n), n));
+  }
+  return out;
+}
+function mergeStatic(root, out) {
+  root.updateMatrixWorld(true);
+  const buckets = new Map(), keep = [], wp = new THREE.Vector3();
+  root.traverse(o => {
+    if (o === root) return;
+    if (!o.isMesh || o.isInstancedMesh) { if (o.parent === root && !o.isMesh && !o.isGroup) keep.push(o); return; }
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    if (mats.some(m => m.transparent)) { keep.push(o); return; }
+    let g = o.geometry.index ? o.geometry.toNonIndexed() : o.geometry.clone();
+    g.applyMatrix4(o.matrixWorld);
+    if (!g.attributes.uv) { g.dispose(); keep.push(o); return; }
+    const parts = Array.isArray(o.material) && o.geometry.groups.length
+      ? o.geometry.groups.map(gr => [sliceGeo(g, gr.start, gr.count), mats[gr.materialIndex]])
+      : [[sliceGeo(g, 0, g.attributes.position.count), mats[0]]];
+    g.dispose();
+    o.getWorldPosition(wp);
+    const chunk = Math.floor(wp.x / (16 * S)) + ',' + Math.floor(wp.z / (16 * S));
+    for (const [pg, m] of parts) {
+      const key = m.uuid + '|' + chunk + '|' + o.castShadow;
+      if (!buckets.has(key)) buckets.set(key, { m, cast: o.castShadow, geos: [] });
+      buckets.get(key).geos.push(pg);
+    }
+  });
+  for (const b of buckets.values()) {
+    const merged = mergeGeometries(b.geos, false);
+    b.geos.forEach(g => g.dispose());
+    if (!merged) continue;
+    const ms = new THREE.Mesh(merged, b.m);
+    ms.castShadow = b.cast; ms.receiveShadow = true;
+    out.add(ms);
+  }
+  // прозрачные и спец-объекты переносим как есть (с сохранением мировых координат)
+  for (const o of keep) { o.updateMatrixWorld(true); o.matrixWorld.decompose(o.position, o.quaternion, o.scale); out.add(o); }
 }
 
 export function disposeWorld(world, scene) {

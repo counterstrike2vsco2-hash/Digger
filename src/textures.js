@@ -1,9 +1,10 @@
 // Процедурные текстуры на canvas — никаких внешних картинок.
 import * as THREE from 'three';
 import { mulberry32 } from './level.js';
+import { QP, stdMat, waterMat } from './quality.js';
 
-let maxAniso = 4;
-export function setAniso(a) { maxAniso = a; }
+let maxAniso = QP.aniso;
+export function setAniso(a) { maxAniso = Math.min(a, QP.aniso); }
 
 function canvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
 
@@ -35,6 +36,7 @@ function cracks(g, w, h, r, n, col = 'rgba(0,0,0,.5)') {
 
 // карта высот = яркость → bumpMap
 function toBump(src) {
+  if (!QP.bump) return null;
   const c = canvas(src.width, src.height), g = c.getContext('2d');
   g.filter = 'grayscale(1) contrast(1.4)';
   g.drawImage(src, 0, 0);
@@ -42,6 +44,7 @@ function toBump(src) {
 }
 
 function tex(c, repeat = 1, srgb = true) {
+  if (!c) return null;
   const t = new THREE.CanvasTexture(c);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
   t.repeat.set(repeat, repeat);
@@ -115,7 +118,7 @@ export function floorMaterial(style) {
       c = concreteCanvas(7, '#56524b', 'rgba(30,25,15,.35)');
     }
     const t = tex(c), b = tex(toBump(c), 1, false);
-    return new THREE.MeshStandardMaterial({ map: t, bumpMap: b, bumpScale: style === 'metal' ? 3 : 1.5, roughness: style === 'tile' ? 0.45 : style === 'metal' ? 0.55 : 0.92, metalness: style === 'metal' ? 0.4 : 0 });
+    return stdMat({ map: t, bumpMap: b, bumpScale: style === 'metal' ? 3 : 1.5, roughness: style === 'tile' ? 0.45 : style === 'metal' ? 0.55 : 0.92, metalness: style === 'metal' ? 0.4 : 0 });
   });
 }
 
@@ -153,7 +156,7 @@ export function wallMaterial(variant = 0) {
     cracks(g, w, h, r, 10);
     const t = tex(c); t.repeat.set(1, 1);
     const b = tex(toBump(c), 1, false);
-    return new THREE.MeshStandardMaterial({ map: t, bumpMap: b, bumpScale: 2, roughness: 0.88 });
+    return stdMat({ map: t, bumpMap: b, bumpScale: 2, roughness: 0.88 });
   });
 }
 
@@ -163,7 +166,7 @@ export function ceilingMaterial() {
     g.fillStyle = 'rgba(0,0,0,.5)'; g.fillRect(0, 0, 512, 6); g.fillRect(0, 0, 6, 512);
     const r = mulberry32(5); blotches(g, 512, 512, r, 6, 'rgba(60,80,50,.35)', 30, 90); // плесень
     const t = tex(c), b = tex(toBump(c), 1, false);
-    return new THREE.MeshStandardMaterial({ map: t, bumpMap: b, bumpScale: 1.5, roughness: 0.95 });
+    return stdMat({ map: t, bumpMap: b, bumpScale: 1.5, roughness: 0.95 });
   });
 }
 
@@ -173,8 +176,7 @@ export function waterMaterial() {
     g.fillStyle = '#808080'; g.fillRect(0, 0, 256, 256);
     blotches(g, 256, 256, r, 120, 'rgba(255,255,255,.18)', 6, 30);
     blotches(g, 256, 256, r, 120, 'rgba(0,0,0,.18)', 6, 30);
-    const b = tex(c, 1, false);
-    return new THREE.MeshStandardMaterial({ color: 0x0c1c1e, roughness: 0.08, metalness: 0.7, transparent: true, opacity: 0.86, bumpMap: b, bumpScale: 0.6 });
+    return waterMat({ color: 0x0c1c1e, roughness: 0.08, metalness: 0.7, transparent: true, opacity: 0.86, bumpMap: tex(c, 1, false), bumpScale: 0.6 });
   });
 }
 
@@ -183,9 +185,9 @@ function simpleMat(key, draw, opts = {}, size = 256) {
     const c = canvas(size, size), g = c.getContext('2d'), r = mulberry32(key.length * 131 + 7);
     draw(g, size, r);
     const { bump, bumpScale, ...rest } = opts;
-    const m = new THREE.MeshStandardMaterial(Object.assign({ map: tex(c), roughness: 0.8 }, rest));
-    if (bump !== false) { m.bumpMap = tex(toBump(c), 1, false); m.bumpScale = bumpScale || 1.5; }
-    return m;
+    const o = Object.assign({ map: tex(c), roughness: 0.8 }, rest);
+    if (bump !== false && QP.bump) { o.bumpMap = tex(toBump(c), 1, false); o.bumpScale = bumpScale || 1.5; }
+    return stdMat(o);
   });
 }
 
@@ -219,8 +221,8 @@ export const M = {
     blotches(g, s, s, r, 15, 'rgba(130,70,30,.4)', 3, 14);
     speckle(g, s, s, r, 2500, ['rgba(0,0,0,.2)', 'rgba(255,255,255,.06)'], 1, 2);
   }, { roughness: 0.5, metalness: 0.55 }),
-  darkMetal: () => mat('darkMetal', () => new THREE.MeshStandardMaterial({ color: 0x24282a, roughness: 0.5, metalness: 0.7 })),
-  steel: () => mat('steel', () => new THREE.MeshStandardMaterial({ color: 0x8a9196, roughness: 0.35, metalness: 0.85 })),
+  darkMetal: () => mat('darkMetal', () => stdMat({ color: 0x24282a, roughness: 0.5, metalness: 0.7 })),
+  steel: () => mat('steel', () => stdMat({ color: 0x8a9196, roughness: 0.35, metalness: 0.85 })),
   white: () => simpleMat('whiteEnamel', (g, s, r) => {
     g.fillStyle = '#c9c6ba'; g.fillRect(0, 0, s, s);
     blotches(g, s, s, r, 20, 'rgba(110,80,40,.3)', 5, 30);
@@ -237,11 +239,11 @@ export const M = {
     for (let i = 0; i < s; i += 4) { g.fillStyle = 'rgba(0,0,0,.08)'; g.fillRect(i, 0, 2, s); g.fillRect(0, i, s, 2); }
     blotches(g, s, s, r, 12, 'rgba(70,40,20,.4)', 10, 50);
   }, { roughness: 1 }),
-  guardCloth: () => mat('guardCloth', () => new THREE.MeshStandardMaterial({ color: 0x1b2433, roughness: 0.9 })),
-  black: () => mat('black', () => new THREE.MeshStandardMaterial({ color: 0x0b0b0b, roughness: 0.8 })),
-  skin: () => mat('skin', () => new THREE.MeshStandardMaterial({ color: 0xb08468, roughness: 0.7 })),
-  rat: () => mat('rat', () => new THREE.MeshStandardMaterial({ color: 0x3e3531, roughness: 0.95 })),
-  ratTail: () => mat('ratTail', () => new THREE.MeshStandardMaterial({ color: 0x9a7b72, roughness: 0.7 })),
+  guardCloth: () => mat('guardCloth', () => stdMat({ color: 0x1b2433, roughness: 0.9 })),
+  black: () => mat('black', () => stdMat({ color: 0x0b0b0b, roughness: 0.8 })),
+  skin: () => mat('skin', () => stdMat({ color: 0xb08468, roughness: 0.7 })),
+  rat: () => mat('rat', () => stdMat({ color: 0x3e3531, roughness: 0.95 })),
+  ratTail: () => mat('ratTail', () => stdMat({ color: 0x9a7b72, roughness: 0.7 })),
   hole: () => mat('hole', () => new THREE.MeshBasicMaterial({ color: 0x000000 })),
 };
 
