@@ -1,10 +1,11 @@
 // ДИГГЕР: БОМБАРЬ 3D — стелс от первого лица в заброшенном советском бомбоубежище.
 import * as THREE from 'three';
 import {
-  MW, MH, WATER, EXIT, DOWN, G, LOOT, SPOTS, ROOM_TYPES, genLevel, findPath, castRay, los,
+  MW, MH, WALL, WATER, EXIT, DOWN, G, LOOT, SPOTS, ROOM_TYPES, genLevel, findPath, castRay, los,
   isSolid, tileAt, dist, angDiff, clamp, pick, ri,
 } from './level.js';
-import { buildWorld, disposeWorld, S, WH } from './world.js';
+import { buildWorld, disposeWorld, S, WH, CH, NCX, NCY } from './world.js';
+import { Visibility } from './visibility.js';
 import { M, labelTexture, beamTexture, glowTexture, setAniso } from './textures.js';
 import { audioInit, SFX, noise as sndNoise } from './audio.js';
 import { QP, QNAME, QUALITY, GPU, AUTO, PERF, PERF_AUTO, WEAK_GPU, PRESETS, setPreset, setPerf, stdMat as qMat } from './quality.js';
@@ -230,6 +231,35 @@ function makeRat() {
 //  Состояние
 // ============================================================
 let world = null;
+// --- отсечение невидимого: рисуем только куски карты, которые игрок реально может увидеть
+const vis = new Visibility(MW, MH, CH);
+const chunkOn = new Uint8Array(NCX * NCY).fill(1), detailOn = new Uint8Array(NCX * NCY).fill(1);
+const DETAIL_DIST = Q.lite ? 24 : 34;              // дальше этого мелочи (реквизит, мусор, трубы) не рисуются
+const opaqueTile = (x, y) => G.map[y * MW + x] === WALL;
+const visFwd = new THREE.Vector3();
+function updateVisibility() {
+  if (!world || !world.chunks) return;
+  camera.getWorldDirection(visFwd);
+  let fx = visFwd.x, fz = visFwd.z, l = Math.hypot(fx, fz);
+  if (l < 0.2) { fx = -Math.sin(P.yaw); fz = -Math.cos(P.yaw); l = 1; }
+  fx /= l; fz /= l;
+  const halfH = Math.atan(Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) * camera.aspect);
+  vis.compute(camera.position.x / S, camera.position.z / S, fx, fz, Math.min(Math.PI, halfH + 0.3), camera.far / S + 1, opaqueTile);
+  const cs = CH * S, cxp = camera.position.x, czp = camera.position.z;
+  for (let ci = 0; ci < world.chunks.length; ci++) {
+    const on = vis.chunkVisible(ci) ? 1 : 0;
+    let det = on;
+    if (on) { // расстояние от камеры до ближайшей точки куска
+      const x0 = (ci % NCX) * cs, z0 = Math.floor(ci / NCX) * cs;
+      const dx = Math.max(x0 - cxp, 0, cxp - x0 - cs), dz = Math.max(z0 - czp, 0, czp - z0 - cs);
+      det = Math.hypot(dx, dz) < DETAIL_DIST ? 1 : 0;
+    }
+    if (on !== chunkOn[ci] || det !== detailOn[ci]) {
+      chunkOn[ci] = on; detailOn[ci] = det;
+      for (const o of world.chunks[ci]) o.visible = o.userData.detail ? !!det : !!on;
+    }
+  }
+}
 const ents = new THREE.Group(); scene.add(ents);
 const P = { x: 0, y: 0, yaw: 0, pitch: 0, a: 0, light: true, battery: 100, stepT: 0, bob: 0, moving: false, running: false, crouch: false, r: 0.22, eyeY: 1.62 };
 let caughtBy = null, caughtT = 0, lampTimer = 0, exploreTimer = 0, miniTimer = 0;
@@ -378,6 +408,7 @@ function enterLevel(first) {
     disposeWorld(world, scene); clearEntities();
     genLevel(G.level);
     world = buildWorld(scene);
+    chunkOn.fill(1); detailOn.fill(1);
     // предметы
     for (const it of G.items) {
       const m = makeItem(it.type); m.position.set(w(it.x), tileAt(it.x, it.y) === WATER ? 0.04 : 0, w(it.y)); m.rotation.y = Math.random() * 6;
@@ -757,6 +788,7 @@ function sync3D(dt) {
   const fovT = P.running ? 80 : 72;
   if (Math.abs(camera.fov - fovT) > 0.1) { camera.fov += (fovT - camera.fov) * Math.min(1, dt * 5); camera.updateProjectionMatrix(); }
   camera.getWorldDirection(camFwd);
+  updateVisibility();
 
   // фонарь в руке
   handFL.position.set(0.17 + Math.cos(P.bob * 0.5) * bobA * 0.3, -0.17 + Math.abs(Math.sin(P.bob * 0.5)) * bobA * 0.4, -0.42);
@@ -775,7 +807,8 @@ function sync3D(dt) {
   const lamps = G.lamps.filter(L => !L.moon);
   if (lampTimer <= 0) {
     lampTimer = 0.25;
-    lamps.sort((a, b) => dist(a.x, a.y, P.x, P.y) - dist(b.x, b.y, P.x, P.y));
+    const lk = L => dist(L.x, L.y, P.x, P.y) + (vis.pointVisible(L.x, L.y) ? 0 : 30); // свет — тем лампам, что в поле зрения
+    lamps.sort((a, b) => lk(a) - lk(b));
     lampPool.forEach((l, i) => { l.userData.lamp = lamps[i] || null; if (lamps[i]) { l.position.copy(lamps[i].world); l.color.copy(lamps[i].color); } });
   }
   for (const L of lamps) if (L.bulb) L.bulb.emissiveIntensity = L.on ? 2.5 * (0.9 + 0.1 * Math.sin(G.time * 13 + L.x)) : 0.05;
@@ -785,10 +818,14 @@ function sync3D(dt) {
   if (world && world.waterMesh) { const b = world.waterMesh.material.bumpMap || world.waterMesh.material.map; if (b) { b.offset.x = G.time * 0.03; b.offset.y = Math.sin(G.time * 0.4) * 0.05; } }
 
   // охрана
-  const byDist = [...G.guards].sort((a, b) => dist(a.x, a.y, P.x, P.y) - dist(b.x, b.y, P.x, P.y));
+  for (const g of G.guards) g.seen = vis.pointVisible(g.x, g.y) || vis.pointVisible(g.x + Math.cos(g.a) * 5, g.y + Math.sin(g.a) * 5);
+  const gk = g => dist(g.x, g.y, P.x, P.y) + (g.seen ? 0 : 30);
+  const byDist = [...G.guards].sort((a, b) => gk(a) - gk(b));
   guardSpotPool.forEach((l, i) => { l.userData.g = byDist[i] || null; });
   for (const g of G.guards) {
     const m = g.mesh, u = m.userData;
+    m.visible = g.seen;
+    if (!g.seen) continue; // за стенами — не рисуем и не анимируем
     m.position.set(w(g.x), 0, w(g.y)); m.rotation.y = -g.a;
     const swing = g.path.length ? Math.sin(g.walk) * 0.55 : 0;
     u.legL.rotation.z = swing; u.legR.rotation.z = -swing; u.armL.rotation.z = -swing * 0.6;
@@ -807,10 +844,12 @@ function sync3D(dt) {
   }
 
   // крысы
-  for (const r of G.rats) { r.mesh.position.set(w(r.x), 0, w(r.y)); r.mesh.rotation.y = -r.a; }
+  for (const r of G.rats) { const v = vis.pointVisible(r.x, r.y); r.mesh.visible = v; if (v) { r.mesh.position.set(w(r.x), 0, w(r.y)); r.mesh.rotation.y = -r.a; } }
 
   // блики на предметах, освещённых фонарём
   for (const it of G.items) {
+    const v = vis.pointVisible(it.x, it.y); it.mesh.visible = v;
+    if (!v) continue;
     const gl = it.mesh.userData.glint;
     tmpV.set(w(it.x) - camera.position.x, 0.3 - camera.position.y, w(it.y) - camera.position.z);
     const dd = tmpV.length(); tmpV.divideScalar(dd);
@@ -864,13 +903,18 @@ function drawMinimap() {
 // ============================================================
 //  Главный цикл
 // ============================================================
-let last = performance.now();
+let last = performance.now(), idleT = 0;
 function frame(now) {
   const rawDt = (now - last) / 1000, dt = Math.min(0.05, rawDt); last = now;
   updateFPS(rawDt);
   if (G.state === 'play') update(dt);
-  if (world) { sync3D(dt); renderer.render(scene, camera); }
-  else { // меню: медленный пролёт по пустому бомбарю отрисовывается после первой загрузки
+  // в игре — каждый кадр; на паузе, в меню и на финальном экране картинка стоит,
+  // поэтому перерисовываем её редко и не грузим видеокарту впустую
+  const live = G.state === 'play' || G.state === 'trans';
+  idleT -= rawDt;
+  if (live || idleT <= 0) {
+    idleT = 0.5;
+    if (world) sync3D(dt);
     renderer.render(scene, camera);
   }
   miniTimer -= dt;
@@ -880,4 +924,4 @@ function frame(now) {
 requestAnimationFrame(frame);
 
 // Отладка / автотесты
-window.__digger = { G, P, startRun, interact, update, THREE, renderer, scene, camera };
+window.__digger = { G, P, startRun, interact, update, sync3D, vis, getWorld: () => world, THREE, renderer, scene, camera };

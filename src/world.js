@@ -7,6 +7,23 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 
 export const S = 2;      // размер тайла в метрах
 export const WH = 3;     // высота потолка
+export const CH = 8;     // размер куска карты (чанка) в тайлах — единица отсечения невидимого
+export const NCX = Math.ceil(MW / CH), NCY = Math.ceil(MH / CH);
+export const chunkIdx = (tx, ty) => Math.min(NCY - 1, Math.max(0, Math.floor(ty / CH))) * NCX + Math.min(NCX - 1, Math.max(0, Math.floor(tx / CH)));
+const chunkW = (wx, wz) => chunkIdx(wx / S, wz / S);
+// InstancedMesh, разложенные по чанкам (камни, бумажки, трубы)
+function instChunks(group, geo, mat, items, cast, recv) {
+  const by = new Map();
+  for (const it of items) { const c = chunkW(it.x, it.z); if (!by.has(c)) by.set(c, []); by.get(c).push(it.m); }
+  for (const [c, ms] of by) {
+    const im = new THREE.InstancedMesh(geo, mat, ms.length);
+    ms.forEach((m, k) => im.setMatrixAt(k, m));
+    im.castShadow = cast; im.receiveShadow = recv;
+    im.computeBoundingSphere();
+    im.userData.chunk = c; im.userData.detail = true;
+    group.add(im);
+  }
+}
 
 // ---------- сборщик склеенной геометрии ----------
 class GeoBuilder {
@@ -172,13 +189,15 @@ export function buildWorld(scene) {
   const isWall = (x, y) => (x < 0 || y < 0 || x >= MW || y >= MH) ? true : map[y * MW + x] === WALL;
   const r = mulberry32(G.levelSeed ^ 0x5bd1e995);
 
-  const floors = {}, walls = {}, water = new GeoBuilder(), lintel = new GeoBuilder(), shaft = new GeoBuilder(), pit = new GeoBuilder();
+  const floors = {}, walls = {}, waters = {}, lintels = {}, shaft = new GeoBuilder(), pit = new GeoBuilder();
   // геометрия режется на куски CH×CH тайлов: работает отсечение по камере и сортировка спереди-назад
-  const CH = 16, ck = (x, y) => Math.floor(x / CH) + ',' + Math.floor(y / CH);
+  const ck = (x, y) => chunkIdx(x, y);
   const ceils = {};
   const fb = (k, x, y) => { const key = k + '|' + ck(x, y); return floors[key] || (floors[key] = new GeoBuilder()); };
   const wb = (k, x, y) => { const key = k + '|' + ck(x, y); return walls[key] || (walls[key] = new GeoBuilder()); };
   const cb = (x, y) => { const key = ck(x, y); return ceils[key] || (ceils[key] = new GeoBuilder()); };
+  const wab = (x, y) => { const key = ck(x, y); return waters[key] || (waters[key] = new GeoBuilder()); };
+  const lb = (x, y) => { const key = ck(x, y); return lintels[key] || (lintels[key] = new GeoBuilder()); };
   const U = 1 / (2 * S); // одна текстура на 2 тайла
 
   for (let y = 0; y < MH; y++) for (let x = 0; x < MW; x++) {
@@ -208,8 +227,8 @@ export function buildWorld(scene) {
     if (t === DOOR) style = 'door';
     const fuv = style === 'door' ? 1 / S : U;
     fb(style, x, y).quad([[x0, 0, z0], [x0, 0, z1], [x1, 0, z1], [x1, 0, z0]], [0, 1, 0], [[x0 * fuv, -z0 * fuv], [x0 * fuv, -z1 * fuv], [x1 * fuv, -z1 * fuv], [x1 * fuv, -z0 * fuv]]);
-    if (t === WATER) water.quad([[x0, 0.07, z0], [x0, 0.07, z1], [x1, 0.07, z1], [x1, 0.07, z0]], [0, 1, 0], [[x0 * U, z0 * U], [x0 * U, z1 * U], [x1 * U, z1 * U], [x1 * U, z0 * U]]);
-    if (t === DOOR) lintel.box(x0, 2.35, z0, x1, WH, z1, 0.5);
+    if (t === WATER) wab(x, y).quad([[x0, 0.07, z0], [x0, 0.07, z1], [x1, 0.07, z1], [x1, 0.07, z0]], [0, 1, 0], [[x0 * U, z0 * U], [x0 * U, z1 * U], [x1 * U, z1 * U], [x1 * U, z0 * U]]);
+    if (t === DOOR) lb(x, y).box(x0, 2.35, z0, x1, WH, z1, 0.5);
   }
 
   // шахта люка (выход) — вверх
@@ -229,15 +248,18 @@ export function buildWorld(scene) {
     pit.quad([[x1, h0, z0], [x1, h0, z1], [x1, h1, z1], [x1, h1, z0]], [-1, 0, 0], [[0, 0], [1, 0], [1, 2], [0, 2]]);
   }
 
-  const add = (b, m, cast = true) => { if (b.empty) return null; const o = new THREE.Mesh(b.build(), m); o.receiveShadow = true; o.castShadow = cast; group.add(o); return o; };
-  for (const k in floors) add(floors[k], floorMaterial(k.split('|')[0]), false);
-  for (const k in walls) add(walls[k], wallMaterial(+k.split('|')[0]));
-  for (const k in ceils) add(ceils[k], ceilingMaterial(), false);
-  add(lintel, M.greyMetal());
-  add(shaft, M.rust(), false);
-  add(pit, stdMat({ color: 0x15130f, roughness: 1, map: wallMaterial(0).map }), false);
-  const waterMesh = add(water, waterMaterial(), false);
-  if (waterMesh) waterMesh.receiveShadow = true;
+  const add = (b, m, cast = true, chunk) => { if (b.empty) return null; const o = new THREE.Mesh(b.build(), m); o.receiveShadow = true; o.castShadow = cast; o.userData.chunk = chunk; group.add(o); return o; };
+  const ckOf = k => +k.split('|').pop();
+  for (const k in floors) add(floors[k], floorMaterial(k.split('|')[0]), false, ckOf(k));
+  for (const k in walls) add(walls[k], wallMaterial(+k.split('|')[0]), true, ckOf(k));
+  for (const k in ceils) add(ceils[k], ceilingMaterial(), false, +k);
+  const metalM = M.greyMetal();
+  for (const k in lintels) add(lintels[k], metalM, true, +k);
+  add(shaft, M.rust(), false, chunkIdx(G.exit.x, G.exit.y));
+  add(pit, stdMat({ color: 0x15130f, roughness: 1, map: wallMaterial(0).map }), false, chunkIdx(G.down.x, G.down.y));
+  const waterM = waterMaterial();
+  let waterMesh = null;
+  for (const k in waters) { const o = add(waters[k], waterM, false, +k); waterMesh = waterMesh || o; }
 
   // ---------- трубы вдоль коридоров (instanced) ----------
   const pipeSegs = [];
@@ -251,9 +273,7 @@ export function buildWorld(scene) {
   }
   if (pipeSegs.length) {
     const pipeGeo = new THREE.CylinderGeometry(1, 1, 1, 10, 1, true);
-    const pipes = new THREE.InstancedMesh(pipeGeo, M.rust(), pipeSegs.length * 2);
-    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3();
-    let n = 0;
+    const q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3(), items = [];
     for (const [x, y, dx, dy] of pipeSegs) {
       for (const [h, rad, off] of [[2.62, 0.09, 0.18], [2.35, 0.05, 0.12]]) {
         if (dy !== 0) { // стена вдоль X
@@ -264,11 +284,10 @@ export function buildWorld(scene) {
           q.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2);
         }
         sc.set(rad, S + 0.01, rad);
-        m4.compose(p, q, sc); pipes.setMatrixAt(n++, m4);
+        items.push({ x: p.x, z: p.z, m: new THREE.Matrix4().compose(p, q, sc) });
       }
     }
-    pipes.count = n; pipes.castShadow = true; pipes.receiveShadow = true;
-    group.add(pipes);
+    instChunks(group, pipeGeo, M.rust(), items, true, true);
   }
 
   // ---------- мусор: камни и бумажки ----------
@@ -276,24 +295,23 @@ export function buildWorld(scene) {
     const openTiles = [];
     for (let i = 0; i < MW * MH; i++) if (map[i] === FLOOR) openTiles.push(i);
     const nRocks = QP.rocks, nPapers = QP.papers;
-    const rocks = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0), floorMaterial('concrete'), nRocks);
-    const papers = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), M.white(), nPapers);
-    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), sc = new THREE.Vector3(), p = new THREE.Vector3();
+    const q = new THREE.Quaternion(), e = new THREE.Euler(), sc = new THREE.Vector3(), p = new THREE.Vector3();
+    const rockItems = [], paperItems = [];
     for (let k = 0; k < nRocks; k++) {
       const i = openTiles[Math.floor(r() * openTiles.length)];
       const s = 0.03 + r() * r() * 0.16;
       p.set((i % MW + r()) * S, s * 0.5, (Math.floor(i / MW) + r()) * S);
       e.set(r() * 6, r() * 6, r() * 6); q.setFromEuler(e); sc.set(s, s * (0.5 + r() * 0.5), s);
-      m4.compose(p, q, sc); rocks.setMatrixAt(k, m4);
+      rockItems.push({ x: p.x, z: p.z, m: new THREE.Matrix4().compose(p, q, sc) });
     }
     for (let k = 0; k < nPapers; k++) {
       const i = openTiles[Math.floor(r() * openTiles.length)];
       p.set((i % MW + r()) * S, 0.01 + r() * 0.01, (Math.floor(i / MW) + r()) * S);
       e.set(-Math.PI / 2 + (r() - .5) * 0.2, 0, r() * 6); q.setFromEuler(e); sc.set(0.21, 0.297, 1);
-      m4.compose(p, q, sc); papers.setMatrixAt(k, m4);
+      paperItems.push({ x: p.x, z: p.z, m: new THREE.Matrix4().compose(p, q, sc) });
     }
-    rocks.castShadow = true; rocks.receiveShadow = true; papers.receiveShadow = true;
-    group.add(rocks, papers);
+    instChunks(group, new THREE.DodecahedronGeometry(1, 0), floorMaterial('concrete'), rockItems, true, true);
+    instChunks(group, new THREE.PlaneGeometry(1, 1), M.white(), paperItems, false, true);
   }
 
   // всё статичное ниже складывается в deco и в конце склеивается
@@ -392,7 +410,12 @@ export function buildWorld(scene) {
   group.add = groupAdd;
   mergeStatic(deco, group);
   scene.add(group);
-  return { group, waterMesh, lampMeshes };
+  // раскладываем всё по чанкам: main.js включает/выключает их по видимости
+  const chunks = Array.from({ length: NCX * NCY }, () => []), always = [];
+  for (const o of group.children) {
+    if (o.userData.chunk === undefined) always.push(o); else chunks[o.userData.chunk].push(o);
+  }
+  return { group, waterMesh, lampMeshes, chunks, always };
 }
 
 // ---------- склейка статики: сотни мешей → десятки ----------
@@ -420,10 +443,10 @@ function mergeStatic(root, out) {
       : [[sliceGeo(g, 0, g.attributes.position.count), mats[0]]];
     g.dispose();
     o.getWorldPosition(wp);
-    const chunk = Math.floor(wp.x / (16 * S)) + ',' + Math.floor(wp.z / (16 * S));
+    const chunk = chunkW(wp.x, wp.z);
     for (const [pg, m] of parts) {
       const key = m.uuid + '|' + chunk + '|' + o.castShadow;
-      if (!buckets.has(key)) buckets.set(key, { m, cast: o.castShadow, geos: [] });
+      if (!buckets.has(key)) buckets.set(key, { m, cast: o.castShadow, chunk, geos: [] });
       buckets.get(key).geos.push(pg);
     }
   });
@@ -433,10 +456,11 @@ function mergeStatic(root, out) {
     if (!merged) continue;
     const ms = new THREE.Mesh(merged, b.m);
     ms.castShadow = b.cast; ms.receiveShadow = true;
+    ms.userData.chunk = b.chunk; ms.userData.detail = true;
     out.add(ms);
   }
   // прозрачные и спец-объекты переносим как есть (с сохранением мировых координат)
-  for (const o of keep) { o.updateMatrixWorld(true); o.matrixWorld.decompose(o.position, o.quaternion, o.scale); out.add(o); }
+  for (const o of keep) { o.updateMatrixWorld(true); o.matrixWorld.decompose(o.position, o.quaternion, o.scale); o.userData.chunk = chunkW(o.position.x, o.position.z); out.add(o); }
 }
 
 export function disposeWorld(world, scene) {
