@@ -160,6 +160,11 @@ h2 .d3 { color: #e8c547; letter-spacing: 4px; }
 #tbtns #btnCrouch { grid-column: 1 / span 2; grid-row: 3; width: 152px; height: 52px; border-radius: 26px; font-size: 22px; }
 body.touch #crosshair { opacity: .6; }
 
+#perfRow { display: block; margin: 12px auto 2px; padding: 8px 12px; max-width: 520px; border: 1px solid #5a5233; background: #1d1a10; cursor: pointer; font-size: 14px; color: #e8c547; text-align: left; }
+#perfRow input { accent-color: #e8c547; width: 16px; height: 16px; vertical-align: middle; margin-right: 4px; }
+#perfRow span { display: block; margin: 3px 0 0 24px; font-size: 11px; color: #9a9585; }
+#quality.disabled { opacity: .45; }
+#quality.disabled::after { content: ' (не действует, пока включён режим производительности)'; font-size: 11px; display: block; }
 #gpuInfo { font-size: 11px; color: #7d786a; margin: 2px 0 6px; }
 #opts { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 16px; font-size: 12px; color: #9a9585; margin-bottom: 6px; }
 #opts label { cursor: pointer; }
