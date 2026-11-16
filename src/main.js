@@ -7,70 +7,61 @@ import {
 import { buildWorld, disposeWorld, S, WH } from './world.js';
 import { M, labelTexture, beamTexture, glowTexture, setAniso } from './textures.js';
 import { audioInit, SFX, noise as sndNoise } from './audio.js';
+import { QP, QNAME, GPU, AUTO, PRESETS, setPreset, stdMat as qMat } from './quality.js';
 
 const $ = id => document.getElementById(id);
 const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
 if (isTouch) document.body.classList.add('touch');
 
 // ============================================================
-//  Качество графики
+//  Качество графики (выбирается при загрузке — см. quality.js)
 // ============================================================
-const QUALITY = {
-  low:    { pr: 0.7, shadows: false, shadowMap: 512,  lamps: 2, guardSpots: 1, dust: 0 },
-  medium: { pr: 1.0, shadows: true,  shadowMap: 512,  lamps: 3, guardSpots: 2, dust: 120 },
-  high:   { pr: 1.5, shadows: true,  shadowMap: 1024, lamps: 4, guardSpots: 2, dust: 260 },
-};
-let qName = localStorage.getItem('digger3d_q') || (isTouch ? 'medium' : 'high');
-let Q = QUALITY[qName];
+const Q = QP;
 
 // ============================================================
 //  Рендерер / сцена
 // ============================================================
-const renderer = new THREE.WebGLRenderer({ canvas: $('game'), antialias: !isTouch, powerPreference: 'high-performance' });
+const renderer = new THREE.WebGLRenderer({ canvas: $('game'), antialias: Q.aa, powerPreference: 'high-performance', stencil: false });
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-setAniso(Math.min(8, renderer.capabilities.getMaxAnisotropy()));
+renderer.toneMappingExposure = Q.lite ? 1.25 : 1.15;
+renderer.shadowMap.enabled = Q.shadows;
+renderer.shadowMap.type = Q.shadowSoft ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+setAniso(renderer.capabilities.getMaxAnisotropy());
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000000);
-scene.fog = new THREE.FogExp2(0x020202, 0.06);
+scene.fog = new THREE.FogExp2(0x020202, Q.far < 35 ? 0.068 : 0.06);
 
-const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.05, 60);
+const camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 0.05, Q.far);
 camera.rotation.order = 'YXZ';
 scene.add(camera);
 
-// --- свет
-const hemi = new THREE.HemisphereLight(0x3a4250, 0x0a0806, 0.22);
+// --- свет (количество источников фиксировано пресетом — каждый стоит дорого на слабой видеокарте)
+const hemi = new THREE.HemisphereLight(0x3a4250, 0x0a0806, Q.lite ? 0.5 : 0.22);
 scene.add(hemi);
 
-const flashlight = new THREE.SpotLight(0xfff0d0, 0, 32, 0.46, 0.5, 1.6);
+const flashlight = new THREE.SpotLight(0xfff0d0, 0, Q.far, 0.46, Q.fill ? 0.5 : 0.8, 1.6);
 flashlight.position.set(0.17, -0.16, -0.6); // у линзы, чтобы не засвечивать руку
 const flTarget = new THREE.Object3D(); flTarget.position.set(0.08, -0.3, -7);
 camera.add(flashlight, flTarget); flashlight.target = flTarget;
-flashlight.shadow.camera.near = 0.2; flashlight.shadow.camera.far = 30;
-flashlight.shadow.bias = -0.0004; flashlight.shadow.normalBias = 0.03;
+flashlight.castShadow = Q.shadows;
+if (Q.shadows) {
+  flashlight.shadow.mapSize.set(Q.shadowMap, Q.shadowMap);
+  flashlight.shadow.camera.near = 0.2; flashlight.shadow.camera.far = 25;
+  flashlight.shadow.bias = -0.0004; flashlight.shadow.normalBias = 0.03;
+}
 
-const fill = new THREE.PointLight(0xffe8c8, 0, 5, 2); // отражённый свет фонаря
-camera.add(fill); fill.position.set(0, 0.2, -1.6);
+let fill = null; // отражённый свет фонаря
+if (Q.fill) { fill = new THREE.PointLight(0xffe8c8, 0, 5, 2); camera.add(fill); fill.position.set(0, 0.2, -1.6); }
 
-const photoFlash = new THREE.PointLight(0xffffff, 0, 18, 1.5);
-camera.add(photoFlash); photoFlash.position.set(0, 0.1, -0.2);
+let moon = null; const moonTarget = new THREE.Object3D();
+if (Q.moon) { moon = new THREE.SpotLight(0x8aa4ff, 0, 14, 0.75, 0.6, 1.4); scene.add(moon, moonTarget); moon.target = moonTarget; }
 
-const moon = new THREE.SpotLight(0x8aa4ff, 0, 14, 0.75, 0.6, 1.4);
-const moonTarget = new THREE.Object3D();
-scene.add(moon, moonTarget); moon.target = moonTarget;
-
-let lampPool = [], guardSpotPool = [];
-function buildLightPools() {
-  for (const l of lampPool) scene.remove(l);
-  for (const l of guardSpotPool) { scene.remove(l); scene.remove(l.target); }
-  lampPool = []; guardSpotPool = [];
-  for (let i = 0; i < Q.lamps; i++) { const l = new THREE.PointLight(0xff4020, 0, 10, 1.7); scene.add(l); lampPool.push(l); }
-  for (let i = 0; i < Q.guardSpots; i++) {
-    const l = new THREE.SpotLight(0xfff2c8, 0, 18, 0.42, 0.5, 1.5); scene.add(l); scene.add(l.target); guardSpotPool.push(l);
-  }
+const lampPool = [], guardSpotPool = [];
+for (let i = 0; i < Q.lamps; i++) { const l = new THREE.PointLight(0xff4020, 0, 10, 1.7); scene.add(l); lampPool.push(l); }
+for (let i = 0; i < Q.guardSpots; i++) {
+  const l = new THREE.SpotLight(0xfff2c8, 0, 18, 0.42, 0.5, 1.5); scene.add(l); scene.add(l.target); guardSpotPool.push(l);
 }
 
 // --- фонарь в руке (виден в кадре)
@@ -80,20 +71,18 @@ const handFL = new THREE.Group();
   body.rotation.x = Math.PI / 2; handFL.add(body);
   const head = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.024, 0.06, 14), M.darkMetal());
   head.rotation.x = Math.PI / 2; head.position.z = -0.12; handFL.add(head);
-  handFL.lens = new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0xfff2c0, emissiveIntensity: 0 });
+  handFL.lens = qMat({ color: 0x222222, emissive: 0xfff2c0, emissiveIntensity: 0 });
   const lens = new THREE.Mesh(new THREE.CircleGeometry(0.03, 14), handFL.lens); lens.position.z = -0.151; lens.rotation.y = Math.PI; handFL.add(lens);
-  const glove = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.09), new THREE.MeshStandardMaterial({ color: 0x1a1a16, roughness: 1 }));
+  const glove = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.05, 0.09), qMat({ color: 0x1a1a16, roughness: 1 }));
   glove.position.set(0.01, -0.02, 0.03); handFL.add(glove);
   handFL.scale.setScalar(0.75);
   handFL.position.set(0.17, -0.17, -0.42);
   camera.add(handFL);
 }
 
-// --- пыль в луче
+// --- пыль в луче (только на средней/высокой)
 let dust = null;
-function buildDust() {
-  if (dust) { scene.remove(dust); dust.geometry.dispose(); dust = null; }
-  if (!Q.dust) return;
+if (Q.dust) {
   const n = Q.dust, pos = new Float32Array(n * 3), col = new Float32Array(n * 3);
   for (let i = 0; i < n; i++) { pos[i * 3] = (Math.random() - .5) * 12; pos[i * 3 + 1] = Math.random() * WH; pos[i * 3 + 2] = (Math.random() - .5) * 12; }
   const gm = new THREE.BufferGeometry();
@@ -104,23 +93,31 @@ function buildDust() {
   scene.add(dust);
 }
 
-function applyQuality() {
-  Q = QUALITY[qName];
-  const dpr = window.devicePixelRatio || 1;
-  renderer.setPixelRatio(qName === 'high' ? Math.min(dpr, 1.5) : qName === 'medium' ? Math.min(dpr, 1) : 0.7);
-  renderer.shadowMap.enabled = Q.shadows;
-  flashlight.castShadow = Q.shadows;
-  flashlight.shadow.mapSize.set(Q.shadowMap, Q.shadowMap);
-  if (flashlight.shadow.map) { flashlight.shadow.map.dispose(); flashlight.shadow.map = null; }
-  buildLightPools(); buildDust();
-  scene.traverse(o => { if (o.material) { const ms = Array.isArray(o.material) ? o.material : [o.material]; ms.forEach(m => m.needsUpdate = true); } });
+// --- динамическое разрешение: держим ~55+ FPS, понижая/повышая внутреннее разрешение
+const DR = { scale: Q.scaleStart, frames: 0, acc: 0, fps: 60, cooldown: 2, enabled: localStorage.getItem('digger3d_dr') !== '0' };
+function applyScale() {
+  const base = Math.min(window.devicePixelRatio || 1, 2);
+  renderer.setPixelRatio(Math.max(0.35, base * DR.scale));
 }
+function updateDR(dt) {
+  DR.frames++; DR.acc += dt;
+  if (DR.acc < 1) return;
+  DR.fps = DR.frames / DR.acc; DR.frames = 0; DR.acc = 0;
+  const el = $('fps');
+  if (el) el.textContent = `${Math.round(DR.fps)} FPS · ${Math.round(DR.scale * 100)}%`;
+  if (!DR.enabled || G.state !== 'play') return;
+  DR.cooldown--;
+  if (DR.cooldown > 0) return;
+  if (DR.fps < Q.targetFps - 8 && DR.scale > Q.scaleMin + 0.001) { DR.scale = Math.max(Q.scaleMin, DR.scale - (DR.fps < 35 ? 0.15 : 0.07)); applyScale(); DR.cooldown = 2; }
+  else if (DR.fps > Q.targetFps + 3 && DR.scale < Q.scaleMax - 0.001) { DR.scale = Math.min(Q.scaleMax, DR.scale + 0.05); applyScale(); DR.cooldown = 3; }
+}
+
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
 }
-window.addEventListener('resize', resize);
-applyQuality(); resize();
+window.addEventListener('resize', () => { applyScale(); resize(); });
+applyScale(); resize();
 
 // ============================================================
 //  Модели: предметы, охрана, крысы
@@ -128,8 +125,9 @@ applyQuality(); resize();
 const box = (w, h, d, m) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.castShadow = true; o.receiveShadow = true; return o; };
 const cyl = (r1, r2, h, m, seg = 14) => { const o = new THREE.Mesh(new THREE.CylinderGeometry(r1, r2, h, seg), m); o.castShadow = true; o.receiveShadow = true; return o; };
 const sph = (r, m) => { const o = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), m); o.castShadow = true; return o; };
-const stdMat = (color, rough = 0.7, metal = 0, extra = {}) => new THREE.MeshStandardMaterial(Object.assign({ color, roughness: rough, metalness: metal }, extra));
-const labelMat = (t, bg, fg) => new THREE.MeshStandardMaterial({ map: labelTexture(t, bg, fg), roughness: 0.7 });
+const matCache = {};
+const stdMat = (color, rough = 0.7, metal = 0, extra = {}) => { const k = [color, rough, metal, extra.emissive || 0].join(); return matCache[k] || (matCache[k] = qMat(Object.assign({ color, roughness: rough, metalness: metal }, extra))); };
+const labelMat = (t, bg, fg) => matCache['l' + t] || (matCache['l' + t] = qMat({ map: labelTexture(t, bg, fg), roughness: 0.7 }));
 
 function makeItem(type) {
   const g = new THREE.Group();
@@ -206,7 +204,7 @@ function makeGuard() {
     leg.position.set(0, 0.88, z); g.add(leg);
   }
   const torso = box(0.28, 0.62, 0.48, cloth); torso.position.y = 1.2; g.add(torso);
-  const back = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.2), new THREE.MeshStandardMaterial({ map: labelTexture('ОХРАНА', '#1b2433', '#e8c547', 256, 128, 'bold 52px sans-serif'), roughness: 0.9 }));
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.2), qMat({ map: labelTexture('ОХРАНА', '#1b2433', '#e8c547', 256, 128, 'bold 52px sans-serif'), roughness: 0.9 }));
   back.position.set(-0.141, 1.32, 0); back.rotation.y = -Math.PI / 2; g.add(back);
   const belt = box(0.3, 0.06, 0.5, black); belt.position.y = 0.92; g.add(belt);
   const head = sph(0.13, skin); head.position.y = 1.66; g.add(head);
@@ -217,7 +215,7 @@ function makeGuard() {
   const fl = cyl(0.03, 0.03, 0.22, M.darkMetal()); fl.position.set(0, -0.58, 0); armR.add(fl);
   armR.position.set(0, 1.48, 0.3); armR.rotation.z = Math.PI / 2 - 0.15; g.add(armR);
   // видимый луч
-  const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 0.04, 7, 24, 1, true),
+  const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 0.04, 7, Q.beamSeg, 1, true),
     new THREE.MeshBasicMaterial({ map: beamTexture(), color: 0xfff0c0, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
   beam.rotation.z = -Math.PI / 2; beam.position.set(0.55 + 3.5, 1.4, 0.3);
   g.add(beam);
@@ -258,6 +256,7 @@ window.addEventListener('keydown', e => {
     if (e.code === 'KeyF') toggleLight();
     if (e.code === 'KeyE' || e.code === 'Space' || e.code === 'Enter') interact();
     if (e.code === 'KeyM') G.showMap = !G.showMap;
+    if (e.code === 'Backquote') { fpsBox.checked = !fpsBox.checked; showFps(fpsBox.checked); }
     if (e.code === 'KeyC' || e.code === 'ControlLeft') input.crouch = !input.crouch;
     if (e.code === 'KeyP' || (e.code === 'Escape' && isTouch)) pauseGame();
   } else if (G.state === 'pause' && e.code === 'KeyP') resumeGame();
@@ -350,11 +349,18 @@ function showBest() {
   $('best').textContent = b ? `Рекорд: ${b} респекта · глубже всего: ярус −${d}` : '';
 }
 showBest();
-function syncQualityButtons() { document.querySelectorAll('#quality button').forEach(b => b.classList.toggle('on', b.dataset.q === qName)); }
-document.querySelectorAll('#quality button').forEach(b => b.addEventListener('click', () => {
-  qName = b.dataset.q; localStorage.setItem('digger3d_q', qName); applyQuality(); syncQualityButtons();
-}));
-syncQualityButtons();
+// --- меню графики
+document.querySelectorAll('#quality button').forEach(b => {
+  b.classList.toggle('on', AUTO ? b.dataset.q === 'auto' : b.dataset.q === QNAME);
+  if (b.dataset.q === 'auto' && AUTO) b.textContent = `Авто: ${PRESETS[QNAME].label}`;
+  b.addEventListener('click', () => setPreset(b.dataset.q));
+});
+$('gpuInfo').textContent = (GPU ? 'Видеокарта: ' + GPU.replace(/^ANGLE \(|\)$/g, '').replace(/ Direct3D.*$/, '').slice(0, 70) : 'Видеокарта не определена') + ` → пресет «${PRESETS[QNAME].label}»`;
+const drBox = $('optDR'), fpsBox = $('optFPS');
+drBox.checked = DR.enabled; drBox.addEventListener('change', () => { DR.enabled = drBox.checked; localStorage.setItem('digger3d_dr', DR.enabled ? '1' : '0'); if (!DR.enabled) { DR.scale = Math.min(1, Q.scaleMax); applyScale(); } });
+const showFps = v => { $('fps').classList.toggle('hidden', !v); localStorage.setItem('digger3d_fps', v ? '1' : '0'); };
+fpsBox.checked = localStorage.getItem('digger3d_fps') !== '0'; showFps(fpsBox.checked);
+fpsBox.addEventListener('change', () => showFps(fpsBox.checked));
 
 // ============================================================
 //  Уровень
@@ -373,7 +379,7 @@ function enterLevel(first) {
   setTimeout(() => {
     disposeWorld(world, scene); clearEntities();
     genLevel(G.level);
-    world = buildWorld(scene, qName);
+    world = buildWorld(scene);
     // предметы
     for (const it of G.items) {
       const m = makeItem(it.type); m.position.set(w(it.x), tileAt(it.x, it.y) === WATER ? 0.04 : 0, w(it.y)); m.rotation.y = Math.random() * 6;
@@ -389,8 +395,7 @@ function enterLevel(first) {
     P.yaw = Math.atan2(-(r0.cx + 0.5 - P.x + 0.001), -(r0.cy + 2.5 - P.y));
     P.pitch = 0; P.light = P.battery > 0;
     // лунный свет
-    moon.position.set(w(G.exit.x + 0.5), WH + 3.5, w(G.exit.y + 0.5)); moonTarget.position.set(w(G.exit.x + 0.5), 0, w(G.exit.y + 0.5));
-    moon.intensity = 60;
+    if (moon) { moon.position.set(w(G.exit.x + 0.5), WH + 3.5, w(G.exit.y + 0.5)); moonTarget.position.set(w(G.exit.x + 0.5), 0, w(G.exit.y + 0.5)); moon.intensity = 60; }
     for (const L of G.lamps) L.on = true;
     G.curZone = -2; G.chaseT = 0; G.flash = 0; caughtBy = null;
     ui.log.innerHTML = '';
@@ -761,10 +766,11 @@ function sync3D(dt) {
   if (P.battery < 15) flick = Math.random() < 0.08 ? 0.2 : 0.75 + Math.random() * 0.25;
   else if (P.battery < 30) flick = 0.88 + Math.random() * 0.08;
   const strength = P.light ? (0.45 + 0.55 * Math.min(1, P.battery / 60)) * flick : 0;
-  flashlight.intensity = 72 * strength;
-  fill.intensity = 1.2 * strength;
+  // вспышка фотоаппарата = короткое усиление фонаря (без отдельного источника света)
+  flashlight.intensity = 72 * strength + G.flash * 600;
+  flashlight.angle = 0.46 + G.flash * 0.6;
+  if (fill) fill.intensity = 1.2 * strength + G.flash * 6;
   handFL.lens.emissiveIntensity = 1.5 * strength;
-  photoFlash.intensity = G.flash * 140;
 
   // лампы: ближайшие получают настоящий свет
   lampTimer -= dt;
@@ -778,7 +784,7 @@ function sync3D(dt) {
   for (const l of lampPool) { const L = l.userData.lamp; l.intensity = L && L.on ? 5 * (0.9 + 0.1 * Math.sin(G.time * 13 + L.x)) : 0; }
 
   // вода
-  if (world && world.waterMesh) { const b = world.waterMesh.material.bumpMap; b.offset.x = G.time * 0.03; b.offset.y = Math.sin(G.time * 0.4) * 0.05; }
+  if (world && world.waterMesh) { const b = world.waterMesh.material.bumpMap || world.waterMesh.material.map; if (b) { b.offset.x = G.time * 0.03; b.offset.y = Math.sin(G.time * 0.4) * 0.05; } }
 
   // охрана
   const byDist = [...G.guards].sort((a, b) => dist(a.x, a.y, P.x, P.y) - dist(b.x, b.y, P.x, P.y));
@@ -862,7 +868,8 @@ function drawMinimap() {
 // ============================================================
 let last = performance.now();
 function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const rawDt = (now - last) / 1000, dt = Math.min(0.05, rawDt); last = now;
+  updateDR(rawDt);
   if (G.state === 'play') update(dt);
   if (world) { sync3D(dt); renderer.render(scene, camera); }
   else { // меню: медленный пролёт по пустому бомбарю отрисовывается после первой загрузки

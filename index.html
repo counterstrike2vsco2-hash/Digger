@@ -27,6 +27,7 @@
     <div id="hPhoto">Фото: 0</div>
     <div id="hStance"></div>
   </div>
+  <div id="fps"></div>
   <div id="roomName"></div>
 </div>
 <canvas id="minimap" class="hidden"></canvas>
@@ -69,7 +70,12 @@
     </div>
     <div class="controls mob">Левая половина экрана — идти, правая — смотреть. Кнопки: фонарь, фото/действие, бег, присесть.</div>
     <div id="quality">Графика:
-      <button data-q="low">Низкая</button><button data-q="medium">Средняя</button><button data-q="high">Высокая</button>
+      <button data-q="auto">Авто</button><button data-q="potato">Слабый ПК</button><button data-q="low">Низкая</button><button data-q="medium">Средняя</button><button data-q="high">Высокая</button>
+    </div>
+    <div id="gpuInfo"></div>
+    <div id="opts">
+      <label><input type="checkbox" id="optDR"> Динамическое разрешение (держит FPS)</label>
+      <label><input type="checkbox" id="optFPS"> Показывать FPS <kbd>Ё</kbd></label>
     </div>
     <button id="btnStart" class="big">ЛЕЗТЬ В БОМБАРЬ</button>
     <div id="best"></div>
