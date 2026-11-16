@@ -1,6 +1,7 @@
 // Каталог предметов. Каждый предмет описан фигурами в локальных координатах (лицом вправо):
 // из них строится физика, отрисовка и иконка в каталоге.
 import { Vec2, Box, Circle, Polygon } from 'planck';
+import { humanIcon } from './human.js';
 
 const METAL = '#3b3f45', METAL2 = '#5a6068', WOOD = '#9a6a3a', WOOD2 = '#7d5229', GRIP = '#2a2420', STEEL = '#c9ced6';
 
@@ -209,6 +210,7 @@ export function iconCanvas(def, size = 64) {
   const c = document.createElement('canvas'); c.width = c.height = size;
   const g = c.getContext('2d');
   if (def.human) {
+    return humanIcon(def.dummy, size);
     g.translate(size / 2, size * 0.94); const k = size / 2.05; g.scale(k, -k);
     const col = def.dummy ? { skin: '#e8c23a', shirt: '#e8c23a', pants: '#d9b02a' } : { skin: '#e8b98f', shirt: '#4f7fc4', pants: '#36456b' };
     const R = (x, y, w, h, c) => { g.fillStyle = c; g.beginPath(); g.roundRect(x - w / 2, y - h / 2, w, h, Math.min(w, h) * 0.45); g.fill(); };

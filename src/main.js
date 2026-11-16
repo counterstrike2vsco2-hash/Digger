@@ -1,6 +1,6 @@
 // РЭГДОЛЛ ЛАБ 2D — песочница с тряпичными человечками (вид сбоку).
-import { World, Vec2, Box, MouseJoint, WeldJoint, RopeJoint, DistanceJoint, AABB } from 'planck';
-import { Human, drawHuman, HUMAN_MASS } from './human.js';
+import { World, Vec2, Box, MouseJoint, WeldJoint, RopeJoint, DistanceJoint, PrismaticJoint, AABB } from 'planck';
+import { Human, drawHuman, HUMAN_MASS, PART_RU, PART_NAMES, HAND_LOCAL, VITAL, drawHealthFigure, healthColor } from './human.js';
 import { CATALOG, CATEGORIES, byId, buildItem, makeFixtures, local, drawShapes, strokeShapes, fillShapes, iconCanvas } from './items.js';
 import * as FX from './fx.js';
 import { WORLD } from './fx.js';
@@ -10,8 +10,6 @@ import { audioInit, SFX, setVolume, setRate } from './audio.js';
 const FIXED = 1 / 60;
 const $ = id => document.getElementById(id);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const PART_RU = { head: 'голова', upper: 'грудь', lower: 'живот', uArmF: 'плечо (ближнее)', lArmF: 'предплечье (ближнее)', uArmB: 'плечо (дальнее)', lArmB: 'предплечье (дальнее)',
-  uLegF: 'бедро (ближнее)', lLegF: 'голень (ближняя)', uLegB: 'бедро (дальнее)', lLegB: 'голень (дальняя)' };
 const STATE_RU = { ok: 'в норме', pain: 'больно', out: 'без сознания', dead: 'мёртв', dummy: 'манекен' };
 
 // ---------------- мир ----------------
@@ -152,7 +150,7 @@ function giveItem(h, it) {
   makeFixtures(it, -h.gid);
   const arm = h.parts.lArmF.body;
   const th = arm.getAngle() - h.dir * Math.PI / 2;
-  const hand = arm.getWorldPoint(Vec2(0, -0.155));
+  const hand = arm.getWorldPoint(Vec2(HAND_LOCAL[0], HAND_LOCAL[1]));
   const g = local(it, it.def.grip), c = Math.cos(th), s = Math.sin(th);
   it.body.setTransform(Vec2(hand.x - (g.x * c - g.y * s), hand.y - (g.x * s + g.y * c)), th);
   it.body.setLinearVelocity(arm.getLinearVelocity()); it.body.setAngularVelocity(0);
@@ -206,8 +204,18 @@ function processStabs() {
       s.body.setTransform(Vec2(pos.x + want.x - tipW.x, pos.y + want.y - tipW.y), s.body.getAngle());
       s.body.setLinearVelocity(s.other.getLinearVelocity()); s.body.setAngularVelocity(s.other.getAngularVelocity());
     }
-    const joint = world.createJoint(new WeldJoint({}, s.body, s.other, s.p));
-    const entry = { item: it, joint, other: s.other, spike: !!s.spike, human: ou.kind === 'part' ? ou.human : null };
+    let joint, entry;
+    if (s.spike) {
+      joint = world.createJoint(new WeldJoint({}, s.body, s.other, s.p));
+      entry = { item: it, joint, other: s.other, spike: true, human: ou.kind === 'part' ? ou.human : null };
+    } else {
+      // лезвие скользит вдоль своей оси: можно вогнать глубже или вытащить, потянув
+      const depth = it.def.id === 'sword' || it.def.id === 'spear' ? 0.12 : it.def.syringe ? 0.05 : 0.07;
+      const blade = BLADE[it.def.id] || 0.12;
+      joint = world.createJoint(new PrismaticJoint({ enableLimit: true, lowerTranslation: -depth - 0.02, upperTranslation: Math.max(0.01, blade - depth),
+        enableMotor: true, maxMotorForce: it.def.syringe ? 30 : 70, motorSpeed: 0, collideConnected: false }, s.other, s.body, s.p, s.axis));
+      entry = { item: it, joint, other: s.other, spike: false, human: ou.kind === 'part' ? ou.human : null, part: ou.kind === 'part' ? ou.part : null, low: -depth - 0.02, deep: 0 };
+    }
     stuck.push(entry);
     if (!s.spike) { it.stuck = entry; if (!it.holder && entry.human) makeFixtures(it, -entry.human.gid); }
     if (ou.kind === 'part' && it.def.syringe) {
@@ -216,14 +224,18 @@ function processStabs() {
       if (!it.used) { it.used = true; inject(h, it.def.syringe); }
       SFX.inject();
     } else if (ou.kind === 'part') {
-      const h = ou.human, dmg = (it.def.id === 'sword' || it.def.id === 'spear' ? 0.35 : 0.22) + s.along * 0.02;
-      h.damage(ou.part.name, dmg, 'sharp', s.p);
+      const h = ou.human, big = it.def.id === 'sword' || it.def.id === 'spear' ? 1.4 : 1;
+      const dmg = (STAB[ou.part.name] || 0.3) * big * clamp(s.along / 6, 0.7, 1.4);
+      h.damage(ou.part.name, dmg, 'sharp', s.p, big);
       hBlood(h, s.p.x, s.p.y, -s.axis.x * 3, -s.axis.y * 3, 14, 2);
       SFX.stab(); if (h.conscious) SFX.ouch();
     } else SFX.crate(6);
   }
   stabQ.length = 0;
 }
+// урон от укола в разные части тела: голова — смертельно, руки/ноги — ранение
+const STAB = { head: 1.05, upper: 0.42, middle: 0.38, lower: 0.32, uArmF: 0.3, uArmB: 0.3, lArmF: 0.28, lArmB: 0.28, uLegF: 0.3, uLegB: 0.3, lLegF: 0.28, lLegB: 0.28, footF: 0.25, footB: 0.25 };
+const BLADE = { knife: 0.15, sword: 0.6, spear: 0.3, syrHeal: 0.08, syrAdr: 0.08, syrDeath: 0.08, syrStr: 0.08 };
 function processSlashes() {
   for (const s of slashQ) {
     const it = s.item, h = s.human;
@@ -232,8 +244,8 @@ function processSlashes() {
     if (it.slashKey === key && time - it.slashT < 0.25) continue;
     it.slashKey = key; it.slashT = time;
     const heavy = it.def.id === 'sword' || it.def.id === 'axe';
-    const dmg = ((s.speed - 6) * 0.035 + 0.06) * (heavy ? 1.8 : 1);
-    h.damage(s.part.name, dmg, 'sharp', s.p);
+    const dmg = ((s.speed - 6) * 0.03 + 0.05) * (heavy ? 1.8 : 1) * (s.part.name === 'head' ? 1.5 : 1);
+    h.damage(s.part.name, dmg, 'sharp', s.p, heavy ? 1.2 : 0.6);
     hBlood(h, s.p.x, s.p.y, 0, 1.5, 10, 3); SFX.stab();
     if (OPT.gore && heavy && s.speed > 10 && s.part.joint && Math.random() < 0.55) severQ.push({ h, part: s.part.name });
   }
@@ -244,15 +256,19 @@ function checkStuck() {
   for (const s of stuck) {
     if (isDead(s.item.body) || isDead(s.other)) continue;
     const f = s.joint.getReactionForce(1 / FIXED).length();
-    const lim = s.spike ? 9000 : 2600;
-    let out = f > lim;
-    if (!s.spike && drag && drag.body === s.item.body && Vec2.distance(drag.target, s.item.body.getPosition()) > 0.55) out = true;
+    let out = f > (s.spike ? 9000 : 6000);
+    if (!s.spike) {
+      const t = s.joint.getJointTranslation();
+      if (t < s.low + 0.012) out = true; // вытащили
+      // вогнали глубже — дополнительная рана
+      if (t > s.deep + 0.04 && s.human && s.part) { s.deep = t; s.human.damage(s.part.name, 0.08, 'sharp', s.item.body.getWorldPoint(local(s.item, s.item.def.tip || [0, 0])), 0.5); SFX.stab(); }
+    }
     if (out) {
       try { world.destroyJoint(s.joint); } catch (e) {}
       s.dead = true; changed = true;
       if (!s.spike) releaseStuckState(s.item);
       const p = s.item.body.getPosition();
-      if (s.human) hBlood(s.human, p.x, p.y, 0, 1, 8, 2);
+      if (s.human) { hBlood(s.human, p.x, p.y, 0, 1, 8, 2); if (s.part && !s.spike) s.part.bleed += 0.002; }
     }
   }
   if (changed) stuck = stuck.filter(s => !s.dead);
@@ -265,9 +281,9 @@ function processImpacts() {
     const u = body.getUserData();
     if (u.kind === 'part') {
       const h = u.human, name = u.part.name;
-      const thr = r.sharp ? 2.5 : 6.5;
+      const thr = r.sharp ? 3.5 : 6.5;
       if (r.dv <= thr) continue;
-      const dmg = (r.dv - thr) * (r.sharp ? 0.05 : 0.042) * (name === 'head' ? 1.6 : 1);
+      const dmg = (r.dv - thr) * (r.sharp ? 0.04 : 0.042) * (name === 'head' ? 1.6 : 1);
       const wasBroken = u.part.broken, wasAlive = h.alive;
       h.damage(name, dmg, r.sharp ? 'sharp' : 'blunt', r.pt);
       SFX.thud(r.dv);
@@ -530,7 +546,7 @@ function fireLaser(it, b, mz, ax) {
   FX.sparks(end.x, end.y, best.nrm.x, best.nrm.y, 3);
   if (best.u && best.u.kind === 'part') {
     const H = best.u.human, part = best.u.part, wasAlive = H.alive;
-    H.damage(part.name, it.def.gun.dmg * (part.name === 'head' ? 2 : 1), 'blunt', null);
+    H.damage(part.name, it.def.gun.dmg * (part.name === 'head' ? 2 : 1), 'burn', null);
     part.char = Math.min(1, (part.char || 0) + 0.08);
     if (Math.random() < 0.25) ignite(part);
     if (OPT.gore && part.hp < -0.6 && part.joint && Math.random() < 0.2) severQ.push({ h: H, part: part.name });
@@ -545,7 +561,7 @@ function fireLaser(it, b, mz, ax) {
 }
 
 // ---------------- разрыв суставов ----------------
-const TEAR = { neck: 5200, spine: 13000, hipF: 11000, hipB: 11000, shoulderF: 6000, shoulderB: 6000, elbowF: 5000, elbowB: 5000, kneeF: 8000, kneeB: 8000 };
+const TEAR = { neck: 5200, chest: 13000, waist: 13000, hipF: 11000, hipB: 11000, shoulderF: 6000, shoulderB: 6000, elbowF: 5000, elbowB: 5000, kneeF: 8000, kneeB: 8000, ankleF: 5000, ankleB: 5000 };
 function tearStep(dt) {
   for (const h of humans) {
     const k = h.grabbed ? 3 : 1;
@@ -595,7 +611,13 @@ function tick(dt) {
       const b = h.held.item.body; b.applyForceToCenter(Vec2(0, -g * b.getMass() * 0.9), true);
     }
   }
-  if (drag) { drag.joint.setTarget(drag.target); if (drag.rot) drag.body.applyTorque(drag.rot * Math.min(400, drag.body.getMass() * 60 + 20), true); }
+  if (drag) {
+    drag.joint.setTarget(drag.target);
+    const b = drag.body, I = b.getInertia() + (drag.u.kind === 'part' ? 1.5 : 0), w = b.getAngularVelocity();
+    // вращение A/D (Q/E) — плавно с постоянной скоростью; без клавиш предмет не крутится сам
+    if (drag.rot) b.applyTorque(clamp((drag.rot * 4.5 - w) * I * 25, -600, 600), true);
+    else if (drag.u.kind === 'item') b.applyTorque(-w * I * 10, true);
+  }
   const t0 = performance.now();
   world.step(dt, QP.vIter, QP.pIter);
   physMs = physMs * 0.9 + (performance.now() - t0) * 0.1;
@@ -629,10 +651,10 @@ function bleedFX(dt, v) {
   for (const h of humans) {
     for (const n in h.parts) {
       const p = h.parts[n];
-      if (p.bleed < 0.02 || !p.wounds.length) continue;
+      if (p.bleed < 0.0015 || !p.wounds.length) continue;
       const pos = p.body.getPosition();
       if (pos.x < v.x0 - 2 || pos.x > v.x1 + 2 || pos.y < v.y0 - 2 || pos.y > v.y1 + 2) continue;
-      if (Math.random() < p.bleed * dt * 25) {
+      if (Math.random() < p.bleed * dt * 500) {
         const w = p.wounds[Math.floor(Math.random() * p.wounds.length)];
         const wp = p.body.getWorldPoint(Vec2(w.x, w.y));
         FX.blood(wp.x, wp.y, 0, 0, 1, 0.4);
@@ -640,8 +662,8 @@ function bleedFX(dt, v) {
     }
     if (h.dummy) continue;
     for (const s of h.stumps) {
-      if (s.t <= 0) continue;
-      s.t -= dt;
+      if (s.t <= 0 || s.part.bleed < 0.004) continue;
+      s.t -= dt * 0.5;
       const wp = s.part.body.getWorldPoint(s.local), c = s.part.body.getWorldCenter();
       let dx = wp.x - c.x, dy = wp.y - c.y; const d = Math.hypot(dx, dy) || 1; dx /= d; dy /= d;
       if (Math.random() < 0.7) FX.blood(wp.x, wp.y, dx * 3 * Math.min(1, s.t), dy * 3 * Math.min(1, s.t), 1, 0.8);
@@ -673,12 +695,12 @@ function clampCam() {
 }
 
 // ---------------- ввод ----------------
-let tool = 'drag', placing = null, placeDir = 1;
+let tool = 'drag', placing = null, placeDir = 1, healthView = false;
 let mouse = { sx: 0, sy: 0, w: Vec2(0, 0), inside: false };
 let drag = null, toolA = null, hover = null, pan = null;
 const keys = new Set();
 const TOOLS = [
-  { id: 'drag', key: '1', name: 'Рука', hint: 'Тащите предметы и людей. Q/E — вращать. Оружие поднесите к руке человека, чтобы он его взял.' },
+  { id: 'drag', key: '1', name: 'Рука', hint: 'Тащите предметы и людей. A/D — вращать то, что держите. Оружие поднесите к руке человека. I — здоровье частей тела.' },
   { id: 'rope', key: '2', name: 'Верёвка', hint: 'Щёлкните по первому объекту, затем по второму (или по пустому месту — привязать к точке).' },
   { id: 'spring', key: '3', name: 'Пружина', hint: 'Щёлкните по двум объектам (или по объекту и пустому месту) — соединит упругой пружиной.' },
   { id: 'weld', key: '4', name: 'Сварка', hint: 'Щёлкните по двум объектам, чтобы намертво соединить их.' },
@@ -864,13 +886,14 @@ addEventListener('keydown', e => {
     case 'KeyZ': if (h) toggleFreeze(h); break;
     case 'KeyH': if (h && h.u.kind === 'part') { h.u.human.heal(); SFX.spawn(); } break;
     case 'KeyC': if (h) { const t = h.u.kind === 'part' ? h.u.part : h.u.item; if (flammable(t)) ignite(t); } break;
-    case 'KeyQ': if (drag) drag.rot = 1; break;
-    case 'KeyE': if (drag) drag.rot = -1; break;
+    case 'KeyQ': case 'KeyA': if (drag) drag.rot = 1; break;
+    case 'KeyE': case 'KeyD': if (drag) drag.rot = -1; break;
+    case 'KeyI': toggleHealthView(); break;
   }
 });
 addEventListener('keyup', e => {
   keys.delete(e.key.toLowerCase());
-  if ((e.code === 'KeyQ' || e.code === 'KeyE') && drag) drag.rot = 0;
+  if (['KeyQ', 'KeyE', 'KeyA', 'KeyD'].includes(e.code) && drag) drag.rot = 0;
 });
 addEventListener('blur', () => { keys.clear(); if (drag) endDrag(); });
 
@@ -918,7 +941,7 @@ function flipOwner(u) {
   const h = u.human;
   if (h.stumps.length) { toast('Нельзя развернуть: не хватает частей тела'); return; }
   const lo = h.parts.lower.body.getPosition();
-  const footY = Math.max(0.005, Math.min(h.parts.lLegF.body.getPosition().y, h.parts.lLegB.body.getPosition().y) - 0.22);
+  const footY = Math.max(0.005, Math.min(h.parts.footF.body.getPosition().y, h.parts.footB.body.getPosition().y) - 0.045);
   const held = h.held ? h.held.item : null;
   const state = { look: h.look, blood: h.blood, alive: h.alive, pain: h.pain, parts: {} };
   for (const n in h.parts) { const p = h.parts[n]; state.parts[n] = { hp: p.hp, broken: p.broken, bleed: p.bleed, wounds: p.wounds.map(w => ({ ...w, x: -w.x })) }; }
@@ -979,7 +1002,7 @@ function buildUI() {
   }
   showCat(CATEGORIES.includes(localStorage.getItem('rl_tab')) ? localStorage.getItem('rl_tab') : CATEGORIES[0]);
   $('bHide').onclick = () => cat.classList.toggle('hide');
-  $('bPause').onclick = togglePause; $('bSlow').onclick = toggleSlow; $('bGrav').onclick = cycleGravity;
+  $('bPause').onclick = togglePause; $('bHealth').onclick = toggleHealthView; $('bSlow').onclick = toggleSlow; $('bGrav').onclick = cycleGravity;
   $('bClear').onclick = () => { clearAll(); toast('Всё очищено'); };
   $('bMenu').onclick = toggleMenu;
   $('play').onclick = () => { audioInit(); toggleMenu(false); };
@@ -997,6 +1020,7 @@ function buildUI() {
   setTool('drag');
 }
 const vol = () => +(localStorage.getItem('rl_vol') || 0.55);
+function toggleHealthView() { healthView = !healthView; $('bHealth').classList.toggle('on', healthView); toast(healthView ? 'Режим здоровья: зелёный — цело, красный — тяжело ранено, чёрный — размозжено' : 'Режим здоровья выключен'); }
 function togglePause() { paused = !paused; $('bPause').classList.toggle('on', paused); $('bPause').textContent = paused ? '▶ Пуск (P)' : '⏸ Пауза (P)'; }
 function toggleSlow() { slowTarget = slowTarget === 1 ? 0.2 : 1; $('bSlow').classList.toggle('on', slowTarget < 1); $('slowmo').classList.toggle('on', slowTarget < 1); }
 function cycleGravity() {
@@ -1021,6 +1045,7 @@ function openCtx(sx, sy) {
     const h = hit.u.human, part = hit.u.part;
     title(`Человек #${h.id} · ${PART_RU[part.name]}`);
     add('Вылечить (H)', () => { h.heal(); SFX.spawn(); });
+    add(healthView ? 'Скрыть здоровье частей (I)' : 'Показать здоровье частей (I)', () => toggleHealthView());
     if (h.alive && !h.conscious) add('Привести в чувство', () => h.wake());
     if (h.alive) add('Убить', () => { h.kill(); SFX.die(); });
     add('Развернуть (X)', () => flipOwner(hit.u));
@@ -1133,9 +1158,10 @@ function render(dt) {
     if (!inView(p.x, p.y, it.rad, v)) continue;
     drawItem(it, hl && hl.u.item === it ? hlColor : null); drawnItems++;
   }
+  ctx.imageSmoothingEnabled = false;
   for (const h of humans) {
     if (!humanInView(h, v)) continue;
-    drawHuman(ctx, h, hl && hl.u.human === h ? hlColor : null); drawnHumans++;
+    drawHuman(ctx, h, hl && hl.u.human === h ? hlColor : null, healthView, 1.5 * DPR / px); drawnHumans++;
   }
   for (const it of items) {
     if (!it.holder) continue;
@@ -1198,23 +1224,42 @@ function render(dt) {
 }
 
 // всплывающая подсказка о человеке под курсором
+let tipFig = null;
 function updateTip() {
   const tip = $('tip');
   if (!hover || drag || !$('ctx').hidden) { tip.hidden = true; return; }
   const u = hover.u;
-  let html;
   if (u.kind === 'part') {
-    const h = u.human, p = u.part, st = h.state();
-    html = `<b>${h.dummy ? 'Манекен' : 'Человек'} #${h.id}</b> — <span class="st-${st}">${STATE_RU[st]}</span><br>Кровь: ${Math.max(0, Math.round(h.blood * 100))}%` +
-      `<br>${PART_RU[p.name]}: ${Math.max(0, Math.round(p.hp * 100))}%${p.broken ? ', <span class="st-dead">перелом</span>' : ''}${p.bleed > 0.02 ? ', кровотечение' : ''}` +
-      (h.held ? `<br>В руке: ${h.held.item.def.name}` : '') + (h.isBurning() ? '<br><span class="st-dead">горит!</span>' : '') +
-      (h.adren > 0 ? '<br>Адреналин' : '') + (h.strong > 0 ? '<br>Сила' : '') + (h.poison > 0 && h.alive ? '<br><span class="st-out">отравлен</span>' : '');
+    const h = u.human, st = h.state();
+    if (tip.dataset.h !== String(h.id) || tip.dataset.kind !== 'h') {
+      tip.dataset.h = h.id; tip.dataset.kind = 'h';
+      tip.innerHTML = `<div class="hp-head"></div><div class="hp-body"><canvas width="70" height="150"></canvas><div class="hp-list"></div></div>`;
+      tipFig = tip.querySelector('canvas');
+    }
+    const bleed = h.totalBleed();
+    tip.querySelector('.hp-head').innerHTML = `<b>${h.dummy ? 'Манекен' : 'Человек'} #${h.id}</b> — <span class="st-${st}">${STATE_RU[st]}</span>` +
+      (!h.alive && !h.dummy && h.cause ? ` <small>(${h.cause})</small>` : '') +
+      (h.dummy ? '' : `<div class="bar"><i style="width:${Math.max(0, h.blood * 100)}%;background:#b01818"></i><span>Кровь ${Math.max(0, Math.round(h.blood * 100))}%${bleed > 0.0005 ? ` · теряет ${(bleed * 100).toFixed(1)}%/с` : ''}</span></div>` +
+        `<div class="bar"><i style="width:${Math.min(100, h.pain / 1.6 * 100)}%;background:#d98a1a"></i><span>Боль ${Math.round(Math.min(1, h.pain / 1.6) * 100)}%</span></div>`) +
+      (h.isBurning() ? '<span class="st-dead">горит!</span> ' : '') + (h.adren > 0 ? 'адреналин ' : '') + (h.strong > 0 ? 'сила ' : '') + (h.poison > 0 && h.alive ? '<span class="st-out">отравлен</span> ' : '') +
+      (h.held ? `<div>В руке: ${h.held.item.def.name}</div>` : '');
+    let rows = '';
+    for (const n of PART_NAMES) {
+      const p = h.parts[n], sev = p.joint && h.joints[p.joint].severed;
+      const hp = Math.round(Math.max(0, p.hp) * 100);
+      const flags = (sev ? ' оторвано' : '') + (p.broken ? ' перелом' : '') + (p.hp <= -0.5 ? ' размозжено' : '') + (p.bleed > 0.0005 ? ' 🩸' : '') + (p.burn > 0 ? ' 🔥' : '');
+      rows += `<div class="row${p === u.part ? ' cur' : ''}"><span class="nm">${PART_RU[n]}${VITAL[n] ? '*' : ''}</span><span class="bar small"><i style="width:${sev ? 0 : hp}%;background:${healthColor(p.hp, 1)}"></i></span><span class="pc">${sev ? '—' : hp + '%'}</span><span class="fl">${flags}</span></div>`;
+    }
+    tip.querySelector('.hp-list').innerHTML = rows + '<div class="note2">* жизненно важные: мозг, сердце</div>';
+    drawHealthFigure(tipFig.getContext('2d'), h, tipFig.width, tipFig.height);
   } else {
+    tip.dataset.kind = 'i'; tip.dataset.h = '';
     const it = u.item;
-    html = `<b>${it.def.name}</b>` + (it.burn > 0 ? ' <span class="st-dead">горит</span>' : '') + (wires.some(w => w.from === it) ? '<br><small>провода: ' + wires.filter(w => w.from === it).length + '</small>' : '') + (it.def.hold && !it.holder ? '<br><small>поднесите к руке человека</small>' : '') + (activateLabel(it) ? `<br><small>F — ${activateLabel(it).toLowerCase()}</small>` : '') +
-      (it.fuse > 0 ? `<br>Таймер: ${it.fuse.toFixed(1)} с` : '');
+    tip.innerHTML = `<b>${it.def.name}</b>` + (it.burn > 0 ? ' <span class="st-dead">горит</span>' : '') + (wires.some(w => w.from === it) ? '<br><small>провода: ' + wires.filter(w => w.from === it).length + '</small>' : '') +
+      (it.def.hold && !it.holder ? '<br><small>поднесите к руке человека</small>' : '') + (activateLabel(it) ? `<br><small>F — ${activateLabel(it).toLowerCase()}</small>` : '') +
+      (it.stuck ? '<br><small>воткнут — потяните, чтобы вытащить</small>' : '') + (it.fuse > 0 ? `<br>Таймер: ${it.fuse.toFixed(1)} с` : '');
   }
-  tip.innerHTML = html; tip.hidden = false;
+  tip.hidden = false;
   tip.style.left = Math.min(mouse.sx + 16, innerWidth - tip.offsetWidth - 6) + 'px';
   tip.style.top = Math.min(mouse.sy + 18, innerHeight - tip.offsetHeight - 6) + 'px';
 }
@@ -1226,8 +1271,9 @@ function frame(now) {
   const t0 = performance.now();
   // панорама клавишами
   const ps = 9 / Math.max(0.5, cam.zoom / 100) * dtReal;
-  if (keys.has('a') || keys.has('ф') || keys.has('arrowleft')) cam.x -= ps;
-  if (keys.has('d') || keys.has('в') || keys.has('arrowright')) cam.x += ps;
+  // A/D: вращают то, что держим мышью; если ничего не держим — двигают камеру
+  if (!drag && (keys.has('a') || keys.has('ф')) || keys.has('arrowleft')) cam.x -= ps;
+  if (!drag && (keys.has('d') || keys.has('в')) || keys.has('arrowright')) cam.x += ps;
   if (keys.has('w') || keys.has('ц') || keys.has('arrowup')) cam.y += ps;
   if (keys.has('s') || keys.has('ы') || keys.has('arrowdown')) cam.y -= ps;
   clampCam();
