@@ -71,4 +71,15 @@ export const SFX = {
   beep(f = 1200) { if (!ctx) return; tone('square', f, f, 0.06, 0.06); },
   pin() { if (!gate('pin', 0.05)) return; noise(0.05, 'highpass', 4000, 2000, 0.3); tone('triangle', 1400, 1300, 0.12, 0.12); },
   splat() { if (!gate('splat', 0.08)) return; noise(0.18, 'lowpass', 900, 200, 0.25, 3); },
+  gun(kind) {
+    if (!gate('gun', 0.04)) return;
+    if (kind === 'shotgun') { noise(0.35, 'lowpass', 3000, 150, 0.9, 0.7); tone('sine', 120, 40, 0.2, 0.5); }
+    else if (kind === 'rifle') { noise(0.12, 'bandpass', 2000, 400, 0.6, 0.7); tone('square', 150, 50, 0.06, 0.18); }
+    else { noise(0.16, 'bandpass', 2600, 500, 0.6, 0.8); tone('square', 180, 60, 0.07, 0.2); }
+  },
+  stab() { if (!gate('stab', 0.06)) return; noise(0.08, 'bandpass', 1800, 600, 0.35, 2); noise(0.15, 'lowpass', 700, 150, 0.25, 2); },
+  crack() { if (!gate('crack', 0.08)) return; noise(0.05, 'highpass', 2500, 1500, 0.6, 1); tone('square', 700, 200, 0.04, 0.12); },
+  weld() { if (!gate('weld', 0.05)) return; noise(0.25, 'highpass', 5000, 3000, 0.25, 1); },
+  freeze() { if (!gate('freeze', 0.05)) return; tone('sine', 1800, 2600, 0.25, 0.08); tone('triangle', 2400, 3600, 0.18, 0.05, 0.05); },
+  rope() { if (!gate('rope', 0.05)) return; noise(0.1, 'bandpass', 1200, 900, 0.25, 4); },
 };

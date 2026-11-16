@@ -1,16 +1,18 @@
 {
-  "name": "ragdoll-sandbox-3d",
+  "name": "ragdoll-lab-2d",
   "private": true,
-  "version": "3.0.0",
-  "description": "Рэгдолл Песочница 3D — физическая песочница с человечками в браузере (three.js + cannon-es)",
+  "version": "4.0.0",
+  "description": "РЭГДОЛЛ ЛАБ 2D — физическая 2D-песочница с человечками (planck.js). 3D-версия — в /3d/",
   "type": "module",
   "scripts": {
-    "build": "esbuild src/main.js --bundle --minify --format=esm --target=es2020 --outfile=js/ragdoll3d.js",
-    "watch": "esbuild src/main.js --bundle --format=esm --target=es2020 --outfile=js/ragdoll3d.js --watch"
+    "build": "esbuild src/main.js --bundle --minify --format=esm --target=es2020 --outfile=js/lab2d.js",
+    "build:3d": "esbuild src3d/main.js --bundle --minify --format=esm --target=es2020 --outfile=3d/js/ragdoll3d.js",
+    "watch": "esbuild src/main.js --bundle --format=esm --target=es2020 --outfile=js/lab2d.js --watch"
   },
   "devDependencies": {
     "cannon-es": "^0.20.0",
     "esbuild": "^0.25.0",
+    "planck": "^1.4.2",
     "three": "^0.187.0"
   }
 }

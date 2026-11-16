@@ -1,118 +1,167 @@
-// Частицы (огонь, дым, искры, кровь, пыль) и следы на полу (пятна, копоть).
-// Всё в пулах фиксированного размера: никакого мусора и аллокаций во время игры.
-import * as THREE from 'three';
+// Частицы (кровь, искры, дым, огонь, гильзы, обломки) и слой пятен крови/копоти.
+import { QP, OPT } from './settings.js';
 
-const VS = `
-attribute float size; attribute vec4 col;
-uniform float uScale; varying vec4 vCol;
-void main() {
-  vCol = col;
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
-  gl_PointSize = size * uScale / max(0.1, -mv.z);
-  gl_Position = projectionMatrix * mv;
-}`;
-const FS = `
-varying vec4 vCol;
-void main() {
-  float d = length(gl_PointCoord - 0.5);
-  float a = smoothstep(0.5, 0.15, d) * vCol.a;
-  if (a < 0.01) discard;
-  gl_FragColor = vec4(vCol.rgb, a);
-}`;
+export const WORLD = { x0: -40, x1: 40, top: 32 };
+const parts = [];
+export const tracers = [];
+export const rings = [];
+let stainCanvas, sctx, SPX;
 
-export class Particles {
-  constructor(scene, max, additive) {
-    this.max = max; this.n = 0; this.head = 0;
-    this.pos = new Float32Array(max * 3); this.vel = new Float32Array(max * 3);
-    this.col = new Float32Array(max * 4); this.size = new Float32Array(max);
-    this.life = new Float32Array(max); this.maxLife = new Float32Array(max);
-    this.grav = new Float32Array(max); this.drag = new Float32Array(max); this.grow = new Float32Array(max);
-    this.kind = new Uint8Array(max); this.alpha0 = new Float32Array(max);
-    const g = new THREE.BufferGeometry();
-    this.aPos = new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage);
-    this.aCol = new THREE.BufferAttribute(this.col, 4).setUsage(THREE.DynamicDrawUsage);
-    this.aSize = new THREE.BufferAttribute(this.size, 1).setUsage(THREE.DynamicDrawUsage);
-    g.setAttribute('position', this.aPos); g.setAttribute('col', this.aCol); g.setAttribute('size', this.aSize);
-    g.setDrawRange(0, max);
-    this.mat = new THREE.ShaderMaterial({
-      uniforms: { uScale: { value: 400 } }, vertexShader: VS, fragmentShader: FS,
-      transparent: true, depthWrite: false, blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
-    });
-    this.points = new THREE.Points(g, this.mat);
-    this.points.frustumCulled = false;
-    scene.add(this.points);
-    this.onGround = null; // (x, z, kind) — частица упала на пол
+export function initStains() {
+  SPX = QP.stainPx;
+  stainCanvas = document.createElement('canvas');
+  stainCanvas.width = Math.ceil((WORLD.x1 - WORLD.x0) * SPX);
+  stainCanvas.height = Math.ceil((WORLD.top + 1) * SPX);
+  sctx = stainCanvas.getContext('2d');
+}
+export function clearStains() { sctx.clearRect(0, 0, stainCanvas.width, stainCanvas.height); }
+const sx = x => (x - WORLD.x0) * SPX, sy = y => (WORLD.top - y) * SPX;
+
+export function stain(x, y, r, color, flat) {
+  sctx.fillStyle = color;
+  sctx.beginPath();
+  if (flat === 'floor') sctx.ellipse(sx(x), sy(y), r * SPX * 1.8, Math.max(1, r * SPX * 0.5), 0, 0, 7);
+  else if (flat === 'wall') sctx.ellipse(sx(x), sy(y), Math.max(1, r * SPX * 0.5), r * SPX * 1.6, 0, 0, 7);
+  else sctx.arc(sx(x), sy(y), r * SPX, 0, 7);
+  sctx.fill();
+}
+export function scorch(x, y, R) {
+  const g = sctx.createRadialGradient(sx(x), sy(y), 0, sx(x), sy(y), R * SPX);
+  g.addColorStop(0, 'rgba(15,12,10,0.75)'); g.addColorStop(1, 'rgba(15,12,10,0)');
+  sctx.fillStyle = g; sctx.beginPath(); sctx.ellipse(sx(x), sy(y), R * SPX, R * SPX * 0.6, 0, 0, 7); sctx.fill();
+}
+/** рисует видимую часть слоя пятен (ctx в мировых координатах, y вверх) */
+export function drawStains(ctx, v) {
+  const x0 = Math.max(WORLD.x0, v.x0), x1 = Math.min(WORLD.x1, v.x1);
+  const y0 = Math.max(-1, v.y0), y1 = Math.min(WORLD.top, v.y1);
+  if (x1 <= x0 || y1 <= y0) return;
+  ctx.save(); ctx.scale(1, -1);
+  ctx.drawImage(stainCanvas, sx(x0), sy(y1), (x1 - x0) * SPX, (y1 - y0) * SPX, x0, -y1, x1 - x0, y1 - y0);
+  ctx.restore();
+}
+
+// ---------- частицы ----------
+// type: 0 кровь, 1 искра, 2 дым, 3 огонь, 4 гильза, 5 обломок, 6 вспышка
+function add(p) {
+  if (parts.length >= QP.particles) { if (p.type === 2 || p.type === 0) return; parts.shift(); }
+  parts.push(p);
+}
+const BLOOD = ['#8a0c0c', '#a01010', '#760808', '#951212'];
+export function blood(x, y, vx, vy, n, spread = 2.5) {
+  if (!OPT.blood) return;
+  for (let i = 0; i < n; i++) {
+    add({ type: 0, x, y, vx: vx + (Math.random() - 0.5) * spread, vy: vy + (Math.random() - 0.5) * spread, life: 3, size: 0.012 + Math.random() * 0.022, color: BLOOD[i & 3] });
   }
-  /** kind: 0 — обычная, 1 — кровь (оставляет пятно), 2 — не падает на пол */
-  spawn(x, y, z, vx, vy, vz, life, size, r, g, b, a = 1, grav = 0, drag = 0, grow = 0, kind = 0) {
-    const i = this.head; this.head = (this.head + 1) % this.max;
-    const i3 = i * 3, i4 = i * 4;
-    this.pos[i3] = x; this.pos[i3 + 1] = y; this.pos[i3 + 2] = z;
-    this.vel[i3] = vx; this.vel[i3 + 1] = vy; this.vel[i3 + 2] = vz;
-    this.col[i4] = r; this.col[i4 + 1] = g; this.col[i4 + 2] = b; this.col[i4 + 3] = a;
-    this.alpha0[i] = a; this.size[i] = size; this.life[i] = life; this.maxLife[i] = life;
-    this.grav[i] = grav; this.drag[i] = drag; this.grow[i] = grow; this.kind[i] = kind;
+}
+export function sparks(x, y, nx, ny, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.atan2(ny, nx) + (Math.random() - 0.5) * 1.8, s = 3 + Math.random() * 7;
+    add({ type: 1, x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.2 + Math.random() * 0.3, size: 0.02, color: '#ffd27a' });
   }
-  update(dt) {
-    const { pos, vel, col, size, life, maxLife } = this;
-    for (let i = 0; i < this.max; i++) {
-      if (life[i] <= 0) { if (col[i * 4 + 3] !== 0) col[i * 4 + 3] = 0; continue; }
-      life[i] -= dt;
-      const i3 = i * 3;
-      const dr = Math.max(0, 1 - this.drag[i] * dt);
-      vel[i3] *= dr; vel[i3 + 1] = vel[i3 + 1] * dr - this.grav[i] * dt; vel[i3 + 2] *= dr;
-      pos[i3] += vel[i3] * dt; pos[i3 + 1] += vel[i3 + 1] * dt; pos[i3 + 2] += vel[i3 + 2] * dt;
-      if (pos[i3 + 1] < 0.03 && this.kind[i] !== 2) {
-        pos[i3 + 1] = 0.03;
-        if (this.kind[i] === 1) { if (this.onGround) this.onGround(pos[i3], pos[i3 + 2], 1); life[i] = 0; }
-        else { vel[i3] *= 0.5; vel[i3 + 2] *= 0.5; vel[i3 + 1] = -vel[i3 + 1] * 0.3; }
-      }
-      size[i] += this.grow[i] * dt;
-      const t = life[i] / maxLife[i];
-      col[i * 4 + 3] = this.alpha0[i] * Math.min(1, t * 2.5);
+}
+export function dust(x, y, nx, ny, n, color = '#8a8478') {
+  for (let i = 0; i < n; i++) {
+    const a = Math.atan2(ny, nx) + (Math.random() - 0.5) * 1.6, s = 1 + Math.random() * 3;
+    add({ type: 5, x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.6 + Math.random() * 0.5, size: 0.02 + Math.random() * 0.02, color, rot: 0, vr: 0 });
+  }
+}
+export function smoke(x, y, n, R = 1, dark = 0.3) {
+  n = Math.ceil(n * QP.smoke);
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, s = Math.random() * R * 1.6;
+    const g = Math.floor(40 + Math.random() * 50 * (1 - dark));
+    add({ type: 2, x: x + Math.cos(a) * R * 0.3 * Math.random(), y: y + Math.sin(a) * R * 0.3 * Math.random(), vx: Math.cos(a) * s, vy: Math.sin(a) * s + 0.6,
+      life: 1.6 + Math.random() * 1.8, max: 3.4, size: R * (0.25 + Math.random() * 0.35), color: `${g},${g},${g}` });
+  }
+}
+export function fire(x, y, n, R) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, s = Math.random() * R * 5;
+    add({ type: 3, x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s + 1, life: 0.25 + Math.random() * 0.35, max: 0.6, size: R * (0.2 + Math.random() * 0.3) });
+  }
+}
+export function flash(x, y, size) { add({ type: 6, x, y, vx: 0, vy: 0, life: 0.06, max: 0.06, size }); }
+export function shell(x, y, dir) {
+  add({ type: 4, x, y, vx: -dir * (1 + Math.random() * 1.5), vy: 2 + Math.random() * 1.5, life: 2.5, size: 0.02, rot: 0, vr: (Math.random() - 0.5) * 30, color: '#d4a640' });
+}
+export function debris(x, y, n, color, speed = 8) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, s = speed * (0.3 + Math.random());
+    add({ type: 5, x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s + 2, life: 1.5 + Math.random(), size: 0.03 + Math.random() * 0.05, color, rot: Math.random() * 6, vr: (Math.random() - 0.5) * 20 });
+  }
+}
+export function tracer(x0, y0, x1, y1) { tracers.push({ x0, y0, x1, y1, life: 0.07 }); }
+export function ring(x, y, R) { rings.push({ x, y, R, life: 0.35 }); }
+export function particleCount() { return parts.length; }
+export function clearParticles() { parts.length = 0; tracers.length = 0; rings.length = 0; }
+
+export function updateFX(dt, g) {
+  let w = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    p.life -= dt;
+    if (p.life <= 0) continue;
+    if (p.type === 2) { p.vx *= 1 - 1.5 * dt; p.vy = p.vy * (1 - 1.5 * dt) + 0.8 * dt; p.size += dt * 0.5; }
+    else if (p.type === 3) { p.vx *= 1 - 4 * dt; p.vy = p.vy * (1 - 4 * dt) + 3 * dt; }
+    else if (p.type !== 6) { p.vy += g * dt; p.vx *= 1 - 0.3 * dt; }
+    if (p.rot !== undefined) p.rot += p.vr * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    // столкновение с полом и стенами
+    if (p.type === 0) {
+      if (p.y <= 0) { stain(p.x, 0.02, p.size * 1.6, p.color, 'floor'); continue; }
+      if (p.x <= WORLD.x0 + 0.02 || p.x >= WORLD.x1 - 0.02) { stain(p.x, p.y, p.size * 1.4, p.color, 'wall'); continue; }
+    } else if (p.y <= 0 && (p.type === 1 || p.type === 4 || p.type === 5)) {
+      p.y = 0; p.vy *= -0.35; p.vx *= 0.6; if (p.vr) p.vr *= 0.5;
+      if (p.type === 1) p.life = Math.min(p.life, 0.1);
     }
-    this.aPos.needsUpdate = true; this.aCol.needsUpdate = true; this.aSize.needsUpdate = true;
+    parts[w++] = p;
   }
-  clear() { this.life.fill(0); this.col.fill(0); }
+  parts.length = w;
+  for (let i = tracers.length - 1; i >= 0; i--) if ((tracers[i].life -= dt) <= 0) tracers.splice(i, 1);
+  for (let i = rings.length - 1; i >= 0; i--) if ((rings[i].life -= dt) <= 0) rings.splice(i, 1);
 }
 
-// пятна на полу: один InstancedMesh, кольцевой буфер
-export class Decals {
-  constructor(scene, max) {
-    this.max = max; this.i = 0;
-    const g = new THREE.CircleGeometry(1, 14); g.rotateX(-Math.PI / 2);
-    this.mesh = new THREE.InstancedMesh(g, new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.85, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }), max);
-    this.mesh.count = 0;
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-    this.mesh.frustumCulled = false;
-    this.m4 = new THREE.Matrix4(); this.q = new THREE.Quaternion(); this.s = new THREE.Vector3(); this.p = new THREE.Vector3(); this.c = new THREE.Color();
-    this.e = new THREE.Euler();
-    scene.add(this.mesh);
+export function drawFX(ctx, v, px) {
+  const m = 1;
+  // дым — снизу, обычная прозрачность
+  for (const p of parts) {
+    if (p.x < v.x0 - m - p.size || p.x > v.x1 + m + p.size || p.y < v.y0 - m - p.size || p.y > v.y1 + m + p.size) continue;
+    if (p.type === 2) {
+      const a = Math.min(1, p.life / p.max * 2) * 0.35;
+      ctx.fillStyle = `rgba(${p.color},${a})`; ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, 7); ctx.fill();
+    }
   }
-  add(x, y, z, r, color) {
-    this.e.set(0, Math.random() * 6.28, 0); this.q.setFromEuler(this.e);
-    this.p.set(x, y + 0.012 + (this.i % 7) * 0.0006, z);
-    this.s.set(r * (0.8 + Math.random() * 0.5), 1, r * (0.8 + Math.random() * 0.5));
-    this.m4.compose(this.p, this.q, this.s);
-    this.mesh.setMatrixAt(this.i, this.m4);
-    this.mesh.setColorAt(this.i, this.c.set(color));
-    this.i = (this.i + 1) % this.max;
-    this.mesh.count = Math.min(this.max, this.mesh.count + 1);
-    this.mesh.instanceMatrix.needsUpdate = true;
-    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  for (const p of parts) {
+    if (p.type === 2) continue;
+    if (p.x < v.x0 - m || p.x > v.x1 + m || p.y < v.y0 - m || p.y > v.y1 + m) continue;
+    switch (p.type) {
+      case 0: ctx.fillStyle = p.color; ctx.fillRect(p.x - p.size, p.y - p.size, p.size * 2, p.size * 2); break;
+      case 1: { ctx.strokeStyle = p.color; ctx.lineWidth = Math.max(0.015, 1.5 / px); ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02); ctx.stroke(); break; }
+      case 3: {
+        const k = p.life / p.max;
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = k > 0.6 ? `rgba(255,220,140,${k * 0.8})` : k > 0.3 ? `rgba(255,120,30,${k * 0.8})` : `rgba(140,40,10,${k})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.size * (0.6 + k * 0.6), 0, 7); ctx.fill();
+        ctx.globalCompositeOperation = 'source-over'; break;
+      }
+      case 4: case 5: {
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillStyle = p.color;
+        ctx.fillRect(-p.size, -p.size * (p.type === 4 ? 0.45 : 0.7), p.size * 2, p.size * (p.type === 4 ? 0.9 : 1.4)); ctx.restore(); break;
+      }
+      case 6: {
+        ctx.fillStyle = 'rgba(255,230,150,0.9)'; ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, 7); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,230,1)'; ctx.beginPath(); ctx.arc(p.x, p.y, p.size * 0.45, 0, 7); ctx.fill(); break;
+      }
+    }
   }
-  clear() { this.mesh.count = 0; this.i = 0; }
-}
-
-// мягкое круглое пятно-тень (для режима без теней)
-let blobTex = null;
-export function blobTexture() {
-  if (blobTex) return blobTex;
-  const c = document.createElement('canvas'); c.width = c.height = 64;
-  const g = c.getContext('2d');
-  const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
-  gr.addColorStop(0, 'rgba(0,0,0,0.55)'); gr.addColorStop(0.6, 'rgba(0,0,0,0.3)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
-  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
-  blobTex = new THREE.CanvasTexture(c);
-  return blobTex;
+  if (tracers.length) {
+    ctx.strokeStyle = 'rgba(255,230,160,0.8)'; ctx.lineWidth = Math.max(0.012, 1.5 / px); ctx.beginPath();
+    for (const t of tracers) { ctx.moveTo(t.x0, t.y0); ctx.lineTo(t.x1, t.y1); }
+    ctx.stroke();
+  }
+  for (const r of rings) {
+    const k = 1 - r.life / 0.35;
+    ctx.strokeStyle = `rgba(255,255,255,${0.5 * (1 - k)})`; ctx.lineWidth = 0.15 * (1 - k) + 0.02;
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.R * k, 0, 7); ctx.stroke();
+  }
 }
