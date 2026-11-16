@@ -1,18 +1,18 @@
 // РЭГДОЛЛ ЛАБ 2D — песочница с тряпичными человечками (вид сбоку).
-import { World, Vec2, Box, MouseJoint, WeldJoint, RopeJoint, AABB } from 'planck';
+import { World, Vec2, Box, MouseJoint, WeldJoint, RopeJoint, DistanceJoint, AABB } from 'planck';
 import { Human, drawHuman, HUMAN_MASS } from './human.js';
-import { CATALOG, CATEGORIES, byId, buildItem, makeFixtures, local, drawShapes, strokeShapes, iconCanvas } from './items.js';
+import { CATALOG, CATEGORIES, byId, buildItem, makeFixtures, local, drawShapes, strokeShapes, fillShapes, iconCanvas } from './items.js';
 import * as FX from './fx.js';
 import { WORLD } from './fx.js';
 import { QP, PERF, PERF_AUTO, GPU, OPT, saveOpt, setPerf } from './settings.js';
-import { audioInit, SFX, setVolume } from './audio.js';
+import { audioInit, SFX, setVolume, setRate } from './audio.js';
 
 const FIXED = 1 / 60;
 const $ = id => document.getElementById(id);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const PART_RU = { head: 'голова', upper: 'грудь', lower: 'живот', uArmF: 'плечо (ближнее)', lArmF: 'предплечье (ближнее)', uArmB: 'плечо (дальнее)', lArmB: 'предплечье (дальнее)',
   uLegF: 'бедро (ближнее)', lLegF: 'голень (ближняя)', uLegB: 'бедро (дальнее)', lLegB: 'голень (дальняя)' };
-const STATE_RU = { ok: 'в норме', pain: 'больно', out: 'без сознания', dead: 'мёртв' };
+const STATE_RU = { ok: 'в норме', pain: 'больно', out: 'без сознания', dead: 'мёртв', dummy: 'манекен' };
 
 // ---------------- мир ----------------
 const GRAV = [{ g: -9.8, name: 'Земля' }, { g: -1.62, name: 'Луна' }, { g: 0, name: 'Невесомость' }];
@@ -25,20 +25,34 @@ ground.createFixture(new Box(2, 30, Vec2(WORLD.x1 + 2, 27)), { friction: 0.6 });
 ground.setUserData({ kind: 'ground' });
 
 const humans = [], items = [];
-let links = [];        // верёвки и сварка от игрока: {type, joint, a, b, la, lb, len}
+let links = [];        // верёвки, пружины и сварка от игрока: {type, joint, a, b, la, lb, len}
+let wires = [];        // провода активации: {from: item, to: item}
+const firePatches = []; // горящие лужи от «молотова»: {x, y, w, t}
+const pressQ = [], beams = [];
 let stuck = [];        // воткнутые ножи/шипы: {item, joint, other, spike, human}
 const stabQ = [], slashQ = [], severQ = [], explQ = [];
 const impacts = new Map();
-let time = 0, paused = false, timeScale = 1, shake = 0, physMs = 0;
+let time = 0, paused = false, timeScale = 1, slowTarget = 1, shake = 0, physMs = 0;
 
 const isDead = b => !b || b.__dead;
 function ownerOf(b) { const u = b && b.getUserData(); return u || null; }
+// кровь у людей, жёлтая пыль у краш-манекенов
+function hBlood(h, x, y, vx, vy, n, spread) { if (h && h.dummy) FX.dust(x, y, vx, vy, Math.ceil(n / 4), '#c9a227'); else FX.blood(x, y, vx, vy, n, spread); }
 
 // ---------------- контакты ----------------
 world.on('begin-contact', c => {
   const fA = c.getFixtureA(), fB = c.getFixtureB();
   checkSharp(c, fA, fB); checkSharp(c, fB, fA);
+  checkPress(fA, fB); checkPress(fB, fA);
 });
+function checkPress(f, fo) {
+  const u = f.getBody().getUserData(); if (!u || u.kind !== 'item') return;
+  const it = u.item, d = it.def;
+  const ou = fo.getBody().getUserData();
+  if (d.mine) { if (it.armT <= 0 && ou && ou.kind !== 'ground' && (ou.kind === 'part' || fo.getBody().getMass() > 1.5)) pressQ.push(it); return; }
+  const ud = f.getUserData();
+  if (d.button && ud && ud.press && ou && ou.kind !== 'ground') pressQ.push(it);
+}
 function checkSharp(c, fs, fo) {
   const sd = fs.getUserData(); if (!sd || !sd.sharp) return;
   const bs = fs.getBody(), bo = fo.getBody();
@@ -55,7 +69,7 @@ function checkSharp(c, fs, fo) {
   const along = Vec2.dot(rel, axis), speed = rel.length();
   const tipW = sd.tip ? bs.getWorldPoint(Vec2(sd.tip[0], sd.tip[1])) : p;
   const nearTip = Vec2.distance(tipW, p) < (sd.spike ? 0.12 : 0.15);
-  if (nearTip && along > (sd.spike ? 3 : 3.2) && (sd.spike || !it.stuck)) {
+  if (nearTip && along > (sd.spike ? 3 : it.def.syringe ? 2.2 : 3.2) && (sd.spike || !it.stuck) && !(it.def.syringe && !isPart)) {
     stabQ.push({ item: it, body: bs, other: bo, p, axis, along, tip: sd.tip, spike: sd.spike });
     c.setEnabled(false);
   } else if (!sd.spike && isPart && speed > 6) {
@@ -82,9 +96,9 @@ function record(body, n, c, otherF) {
 }
 
 // ---------------- создание/удаление ----------------
-function spawnHuman(x, footY, dir = 1) {
+function spawnHuman(x, footY, dir = 1, opts = {}) {
   if (humans.length >= QP.maxHumans) { toast(`Предел людей: ${QP.maxHumans}`); return null; }
-  const h = new Human(world, x, Math.max(0.005, footY), dir);
+  const h = new Human(world, x, Math.max(0.005, footY), dir, opts);
   humans.push(h); return h;
 }
 function spawnItem(def, x, y, dir = 1, angle = 0) {
@@ -93,11 +107,13 @@ function spawnItem(def, x, y, dir = 1, angle = 0) {
   let minY = 1e9;
   for (let f = it.body.getFixtureList(); f; f = f.getNext()) minY = Math.min(minY, f.getAABB(0).lowerBound.y);
   if (minY < 0.005) it.body.setTransform(Vec2(x, y + 0.005 - minY), angle);
+  if (def.mine) it.armT = 1.5;
   items.push(it); return it;
 }
 function destroyBody(b) { if (b.__dead) return; b.__dead = true; world.destroyBody(b); }
 function cleanup() {
   links = links.filter(l => !isDead(l.a) && !isDead(l.b));
+  wires = wires.filter(w => !isDead(w.from.body) && !isDead(w.to.body));
   stuck = stuck.filter(s => {
     if (isDead(s.item.body) || isDead(s.other)) { if (!isDead(s.item.body) && !s.spike) releaseStuckState(s.item); return false; }
     return true;
@@ -122,7 +138,7 @@ function removeOwner(u) { if (!u) return; if (u.kind === 'part') removeHuman(u.h
 function clearAll() {
   for (const h of [...humans]) removeHuman(h);
   for (const it of [...items]) removeItem(it);
-  links = []; stuck = []; FX.clearStains(); FX.clearParticles();
+  links = []; stuck = []; wires = []; firePatches.length = 0; FX.clearStains(); FX.clearParticles();
 }
 
 // ---------------- оружие в руках ----------------
@@ -183,7 +199,7 @@ function processStabs() {
     if (stuck.some(e => e.item === it && e.other === s.other)) continue;
     const ou = s.other.getUserData();
     if (!s.spike) {
-      const depth = it.def.id === 'sword' ? 0.12 : 0.07;
+      const depth = it.def.id === 'sword' || it.def.id === 'spear' ? 0.12 : it.def.syringe ? 0.05 : 0.07;
       const tipW = s.body.getWorldPoint(Vec2(s.tip[0], s.tip[1]));
       const want = Vec2(s.p.x + s.axis.x * depth, s.p.y + s.axis.y * depth);
       const pos = s.body.getPosition();
@@ -194,10 +210,15 @@ function processStabs() {
     const entry = { item: it, joint, other: s.other, spike: !!s.spike, human: ou.kind === 'part' ? ou.human : null };
     stuck.push(entry);
     if (!s.spike) { it.stuck = entry; if (!it.holder && entry.human) makeFixtures(it, -entry.human.gid); }
-    if (ou.kind === 'part') {
-      const h = ou.human, dmg = (it.def.id === 'sword' ? 0.35 : 0.22) + s.along * 0.02;
+    if (ou.kind === 'part' && it.def.syringe) {
+      const h = ou.human;
+      h.damage(ou.part.name, 0.02, 'sharp', s.p);
+      if (!it.used) { it.used = true; inject(h, it.def.syringe); }
+      SFX.inject();
+    } else if (ou.kind === 'part') {
+      const h = ou.human, dmg = (it.def.id === 'sword' || it.def.id === 'spear' ? 0.35 : 0.22) + s.along * 0.02;
       h.damage(ou.part.name, dmg, 'sharp', s.p);
-      FX.blood(s.p.x, s.p.y, -s.axis.x * 3, -s.axis.y * 3, 14, 2);
+      hBlood(h, s.p.x, s.p.y, -s.axis.x * 3, -s.axis.y * 3, 14, 2);
       SFX.stab(); if (h.conscious) SFX.ouch();
     } else SFX.crate(6);
   }
@@ -210,10 +231,10 @@ function processSlashes() {
     const key = h.id + ':' + s.part.name;
     if (it.slashKey === key && time - it.slashT < 0.25) continue;
     it.slashKey = key; it.slashT = time;
-    const heavy = it.def.id === 'sword';
+    const heavy = it.def.id === 'sword' || it.def.id === 'axe';
     const dmg = ((s.speed - 6) * 0.035 + 0.06) * (heavy ? 1.8 : 1);
     h.damage(s.part.name, dmg, 'sharp', s.p);
-    FX.blood(s.p.x, s.p.y, 0, 1.5, 10, 3); SFX.stab();
+    hBlood(h, s.p.x, s.p.y, 0, 1.5, 10, 3); SFX.stab();
     if (OPT.gore && heavy && s.speed > 10 && s.part.joint && Math.random() < 0.55) severQ.push({ h, part: s.part.name });
   }
   slashQ.length = 0;
@@ -231,7 +252,7 @@ function checkStuck() {
       s.dead = true; changed = true;
       if (!s.spike) releaseStuckState(s.item);
       const p = s.item.body.getPosition();
-      if (s.human) FX.blood(p.x, p.y, 0, 1, 8, 2);
+      if (s.human) hBlood(s.human, p.x, p.y, 0, 1, 8, 2);
     }
   }
   if (changed) stuck = stuck.filter(s => !s.dead);
@@ -251,13 +272,15 @@ function processImpacts() {
       h.damage(name, dmg, r.sharp ? 'sharp' : 'blunt', r.pt);
       SFX.thud(r.dv);
       if (!wasBroken && u.part.broken) SFX.crack();
-      if (dmg > 0.12 || r.sharp) FX.blood(r.pt.x, r.pt.y, r.nrm.x * 2, Math.abs(r.nrm.y) * 2 + 1, Math.min(25, Math.ceil(dmg * 30)));
+      if (dmg > 0.12 || r.sharp) hBlood(h, r.pt.x, r.pt.y, r.nrm.x * 2, Math.abs(r.nrm.y) * 2 + 1, Math.min(25, Math.ceil(dmg * 30)));
       if (h.conscious && dmg > 0.05) SFX.ouch();
       if (wasAlive && !h.alive) SFX.die();
       if (OPT.gore && dmg > 1.3 && u.part.joint) severQ.push({ h, part: name });
+      if (r.other) { const ou = r.other.getUserData(); if (ou && ou.kind === 'part' && ou.part.burn > 0 && Math.random() < 0.3) ignite(u.part); }
     } else if (u.kind === 'item') {
       const it = u.item, ex = it.def.explosive;
       if (ex && ex.impact && r.dv > ex.impact) { detonate(it); continue; }
+      if (it.def.molotov && r.dv > it.def.molotov.impact) { breakMolotov(it); continue; }
       if (r.dv > 2.5) { if (it.def.wood) SFX.crate(r.dv); else SFX.metal(r.dv); }
       if (r.dv > 9 && !it.def.wood) FX.sparks(r.pt.x, r.pt.y, r.nrm.x, r.nrm.y, 4);
     }
@@ -270,7 +293,7 @@ function processSevers() {
     const wasAlive = s.h.alive;
     const at = s.h.sever(s.part);
     if (!at) continue;
-    FX.blood(at.x, at.y, 0, 2, 40, 5); SFX.splat();
+    hBlood(s.h, at.x, at.y, 0, 2, 40, 5); if (!s.h.dummy) SFX.splat(); else SFX.crack();
     if (wasAlive && !s.h.alive) SFX.die();
   }
   severQ.length = 0;
@@ -286,7 +309,7 @@ function processExplosions() {
   while (explQ.length) {
     const e = explQ.shift();
     if (e.item && !isDead(e.item.body)) removeItem(e.item);
-    explode(e.x, e.y, e.ex);
+    if (e.molotov) molotovBurst(e.x, e.y, e.molotov); else explode(e.x, e.y, e.ex);
   }
 }
 function explode(x, y, ex) {
@@ -317,12 +340,15 @@ function explode(x, y, ex) {
       const h = u.human, dmg = ex.dmg * Math.pow(f, 1.5);
       h.damage(u.part.name, dmg, 'blast', c);
       hurt.add(h);
-      if (dmg > 0.2) FX.blood(c.x, c.y, dx * 4, dy * 4, Math.ceil(dmg * 10));
+      if (dmg > 0.2) hBlood(h, c.x, c.y, dx * 4, dy * 4, Math.ceil(dmg * 10));
+      if (f > 0.45 && Math.random() < (ex.fire || 0.25)) ignite(u.part);
       if (OPT.gore && f > 0.62 && dmg > 0.8 && u.part.joint && Math.random() < 0.3) severQ.push({ h, part: u.part.name });
     } else if (u && u.kind === 'item') {
       const it = u.item;
       if (it.def.explosive && !it.exploded) it.fuse = it.fuse > 0 ? Math.min(it.fuse, 0.15) : 0.08 + Math.random() * 0.2;
       if (it.stuck && f > 0.3) unstick(it);
+      if (it.def.molotov) breakMolotov(it);
+      if (it.def.wood && f > 0.45 && Math.random() < (ex.fire || 0.25)) ignite(it);
     }
   }
   for (const h of hurt) if (!h.alive) SFX.die();
@@ -335,7 +361,8 @@ function fireGun(it) {
   const b = it.body;
   const mz = b.getWorldPoint(local(it, it.def.muzzle));
   const ax = b.getWorldVector(Vec2(it.dir, 0));
-  SFX.gun(g.sound);
+  if (g.laser) return fireLaser(it, b, mz, ax);
+  if (g.sound === 'sniper') SFX.sniper(); else SFX.gun(g.sound);
   FX.flash(mz.x + ax.x * 0.05, mz.y + ax.y * 0.05, g.pellets > 1 ? 0.14 : 0.09);
   FX.smoke(mz.x, mz.y, 2, 0.18, 0.1);
   if (g.pellets === 1) { const sp = b.getWorldPoint(Vec2(0, 0.03)); FX.shell(sp.x, sp.y, it.dir * Math.sign(ax.x || 1) * it.dir); }
@@ -368,15 +395,17 @@ function fireGun(it) {
         const H = u.human, wasAlive = H.alive;
         H.damage(u.part.name, g.dmg * power * (u.part.name === 'head' ? 3.5 : 1), 'bullet', h.pt);
         h.b.applyLinearImpulse(Vec2(dvx * g.impulse * power, dvy * g.impulse * power), h.pt, true);
-        FX.blood(h.pt.x, h.pt.y, -dvx * 2, -dvy * 2 + 1, 6, 2);
-        FX.blood(h.pt.x, h.pt.y, dvx * 5, dvy * 5 + 1, 10, 2.5);
+        hBlood(H, h.pt.x, h.pt.y, -dvx * 2, -dvy * 2 + 1, 6, 2);
+        hBlood(H, h.pt.x, h.pt.y, dvx * 5, dvy * 5 + 1, 10, 2.5);
+        if (OPT.gore && g.dmg > 1 && u.part.joint && Math.random() < 0.35) severQ.push({ h: H, part: u.part.name });
         if (H.conscious) SFX.ouch();
         if (wasAlive && !H.alive) SFX.die();
-        power *= 0.5;
+        power *= g.pen || 0.5;
       } else {
         const I = u.item;
         h.b.applyLinearImpulse(Vec2(dvx * g.impulse * power, dvy * g.impulse * power), h.pt, true);
         if (I.def.explosive && I.def.activate === 'boom') detonate(I);
+        if (I.def.molotov) breakMolotov(I);
         if (I.def.wood) { FX.dust(h.pt.x, h.pt.y, h.nrm.x, h.nrm.y, 5, '#b8894f'); power *= 0.55; }
         else { FX.sparks(h.pt.x, h.pt.y, h.nrm.x, h.nrm.y, 6); power *= 0.15; SFX.metal(4); }
       }
@@ -387,19 +416,148 @@ function fireGun(it) {
   b.applyLinearImpulse(Vec2(-ax.x * g.recoil, -ax.y * g.recoil), mz, true);
   b.applyAngularImpulse(g.recoil * 0.015 * it.dir * (holder ? 0.3 : 1), true);
 }
-function activate(it) {
+function activate(it, depth = 0) {
+  if (isDead(it.body)) return;
+  if (it.trigT === time && depth > 0) return; // защита от петель из проводов
+  it.trigT = time;
   const d = it.def;
   if (d.gun) { if (d.gun.auto) { it.firing = !it.firing; SFX.click(); } else fireGun(it); }
-  else if (d.activate === 'fuse') { if (it.fuse <= 0) { it.fuse = d.explosive.fuse; SFX.pin(); } }
-  else if (d.activate === 'boom') detonate(it);
-  else toast('У этого предмета нет действия');
+  else if (d.activate === 'fuse') { if (it.fuse <= 0) { it.fuse = d.explosive.fuse; if (!d.mine) SFX.pin(); } }
+  else if (d.activate === 'boom') { if (d.molotov) breakMolotov(it); else detonate(it); }
+  else if (d.activate === 'signal') { it.pressT = 0.25; SFX.button(); }
+  else if (d.activate === 'toggle') { it.on = !it.on; it.timerT = 0; SFX.click(); }
+  else if (d.syringe) { toast('Шприц нужно воткнуть в человека'); }
+  else if (depth === 0 && !wires.some(w => w.from === it)) toast('У этого предмета нет действия');
+  // сигнал идёт дальше по проводам
+  if (depth < 8) for (const w of wires) if (w.from === it) activate(w.to, depth + 1);
 }
+function signal(it) { // кнопка/таймер/мина: только передать сигнал
+  if (depth0Guard(it)) return;
+  for (const w of wires) if (w.from === it) activate(w.to, 1);
+}
+function depth0Guard(it) { if (it.sigT === time) return true; it.sigT = time; return false; }
 function activateLabel(it) {
   const d = it.def;
-  if (d.gun) return d.gun.auto ? (it.firing ? 'Прекратить огонь' : 'Огонь очередями') : 'Выстрелить';
+  if (d.gun) return d.gun.auto ? (it.firing ? 'Прекратить огонь' : (d.gun.laser ? 'Включить лазер' : 'Огонь очередями')) : 'Выстрелить';
+  if (d.mine) return 'Подорвать';
   if (d.activate === 'fuse') return d.id === 'grenade' ? 'Выдернуть чеку' : 'Запустить таймер';
+  if (d.molotov) return 'Разбить';
   if (d.activate === 'boom') return 'Подорвать';
+  if (d.button) return 'Нажать';
+  if (d.activate === 'toggle') return it.on ? 'Выключить' : 'Включить';
   return null;
+}
+
+// ---------------- шприцы ----------------
+function inject(h, kind) {
+  if (h.dummy) return;
+  if (kind === 'heal') { h.heal(); h.wake(); toast('Лечение подействовало'); }
+  else if (kind === 'adren') { h.wake(); h.adren = 25; toast('Адреналин: боль не чувствует 25 с'); }
+  else if (kind === 'death') { if (h.alive) h.poison = 0.01; toast('Яд начал действовать…'); }
+  else if (kind === 'strong') { h.strong = 30; h.wake(); toast('Сила: мышцы в 2 раза сильнее на 30 с'); }
+}
+
+// ---------------- огонь ----------------
+function flammable(t) { return !!t && (t.def && t.def.shapes ? !!(t.def.wood || t.def.id === 'ball') : true); }
+function ignite(t) {
+  if (!t || !flammable(t)) return;
+  if (!(t.burn > 0)) SFX.fireOn();
+  t.burn = Math.max(t.burn || 0, t.def && t.def.wood ? 14 : 9);
+}
+function bodyBurnTarget(b) { const u = b.getUserData(); if (!u) return null; return u.kind === 'part' ? u.part : u.kind === 'item' && flammable(u.item) ? u.item : null; }
+function breakMolotov(it) {
+  if (it.exploded || isDead(it.body)) return; it.exploded = true;
+  const p = it.body.getWorldCenter(), R = it.def.molotov.R;
+  explQ.push({ x: p.x, y: p.y, item: it, molotov: R });
+}
+function molotovBurst(x, y, R) {
+  SFX.glass(); SFX.fireOn();
+  FX.fire(x, y, 40, 0.8); FX.smoke(x, y, 8, 0.8, 0.6);
+  firePatches.push({ x, y: Math.max(0, y), w: R, t: 9 });
+  world.queryAABB(new AABB(Vec2(x - R, y - R), Vec2(x + R, y + R)), f => { const t = bodyBurnTarget(f.getBody()); if (t && Vec2.distance(f.getBody().getWorldCenter(), Vec2(x, y)) < R) ignite(t); return true; });
+  if (y < 1.5) FX.scorch(x, 0.05, R * 0.6);
+}
+function burnStep(dt) {
+  // лужи огня
+  for (let i = firePatches.length - 1; i >= 0; i--) {
+    const f = firePatches[i]; f.t -= dt;
+    if (f.t <= 0) { firePatches.splice(i, 1); continue; }
+    if (Math.random() < 0.5) world.queryAABB(new AABB(Vec2(f.x - f.w, f.y - 0.2), Vec2(f.x + f.w, f.y + 0.6)), fx => { const t = bodyBurnTarget(fx.getBody()); if (t) ignite(t); return true; });
+  }
+  const spread = (time % 0.25) < dt;
+  const burnBody = (b, t, isPart, h) => {
+    t.burn -= dt; t.char = Math.min(1, (t.char || 0) + dt * 0.06);
+    if (isPart) { if (!h.dummy) { h.pain += dt * 0.25; } t.hp -= dt * 0.035; if (h.conscious && Math.random() < dt * 2) SFX.ouch(); if (t.hp < -0.6 && t.name === 'head') h.kill(); }
+    if (spread) for (let ce = b.getContactList(); ce; ce = ce.next) { if (!ce.contact.isTouching()) continue; const o = bodyBurnTarget(ce.other); if (o && !(o.burn > 0) && Math.random() < 0.35) ignite(o); }
+    if (t.burn <= 0) t.burn = 0;
+  };
+  for (const h of humans) {
+    for (const n in h.parts) { const p = h.parts[n]; if (p.burn > 0) burnBody(p.body, p, true, h); }
+    // огонь ползёт по телу через суставы
+    if (spread) for (const jn in h.joints) {
+      const J = h.joints[jn]; if (J.severed) continue;
+      const A = h.parts[J.parent], C = h.parts[J.child];
+      if (A.burn > 0 && !(C.burn > 0) && Math.random() < 0.3) ignite(C);
+      else if (C.burn > 0 && !(A.burn > 0) && Math.random() < 0.3) ignite(A);
+    }
+  }
+  for (const it of items) if (it.burn > 0) { burnBody(it.body, it, false); if (it.char >= 1 && it.def.wood && Math.random() < dt * 0.3) { removeQ.push(it); } }
+  if (removeQ.length) { for (const it of removeQ.splice(0)) if (items.includes(it)) { const p = it.body.getPosition(); FX.debris(p.x, p.y, 8, '#2a1d12', 2); FX.smoke(p.x, p.y, 5, 0.6, 0.8); removeItem(it); } }
+}
+const removeQ = [];
+function fireFX(dt, v) {
+  const vis = (x, y) => x > v.x0 - 1 && x < v.x1 + 1 && y > v.y0 - 1 && y < v.y1 + 1;
+  let any = false;
+  for (const h of humans) for (const n in h.parts) { const p = h.parts[n]; if (p.burn > 0) { const q = p.body.getPosition(); any = true; if (vis(q.x, q.y) && Math.random() < dt * 13) FX.fire(q.x + (Math.random() - 0.5) * 0.12, q.y + (Math.random() - 0.5) * 0.12, 1, 0.2); } }
+  for (const it of items) if (it.burn > 0) { const q = it.body.getPosition(); any = true; if (vis(q.x, q.y) && Math.random() < dt * 22) FX.fire(q.x + (Math.random() - 0.5) * it.rad, q.y + (Math.random() - 0.5) * it.rad * 0.5, 1, 0.32); if (Math.random() < dt * 4) FX.smoke(q.x, q.y + 0.3, 1, 0.4, 0.7); }
+  for (const f of firePatches) { any = true; if (vis(f.x, f.y) && Math.random() < dt * 35) FX.fire(f.x + (Math.random() - 0.5) * 2 * f.w, f.y + 0.05, 1, 0.4 * Math.min(1, f.t / 2)); }
+  if (any) SFX.crackle();
+}
+
+// ---------------- лазер ----------------
+function fireLaser(it, b, mz, ax) {
+  SFX.zap();
+  const p2 = Vec2(mz.x + ax.x * 60, mz.y + ax.y * 60);
+  let best = null;
+  world.rayCast(mz, p2, (fx, pt, nrm, frac) => {
+    const bb = fx.getBody(); if (bb === b) return -1;
+    const u = bb.getUserData(); if (it.holder && u && u.human === it.holder) return -1;
+    best = { b: bb, u, pt: Vec2(pt.x, pt.y), nrm: Vec2(nrm.x, nrm.y) }; return frac;
+  });
+  const end = best ? best.pt : p2;
+  beams.push({ x0: mz.x, y0: mz.y, x1: end.x, y1: end.y, life: 0.1 });
+  if (!best) return;
+  FX.sparks(end.x, end.y, best.nrm.x, best.nrm.y, 3);
+  if (best.u && best.u.kind === 'part') {
+    const H = best.u.human, part = best.u.part, wasAlive = H.alive;
+    H.damage(part.name, it.def.gun.dmg * (part.name === 'head' ? 2 : 1), 'blunt', null);
+    part.char = Math.min(1, (part.char || 0) + 0.08);
+    if (Math.random() < 0.25) ignite(part);
+    if (OPT.gore && part.hp < -0.6 && part.joint && Math.random() < 0.2) severQ.push({ h: H, part: part.name });
+    if (H.conscious) SFX.ouch(); if (wasAlive && !H.alive) SFX.die();
+  } else if (best.u && best.u.kind === 'item') {
+    const I = best.u.item;
+    if (I.def.explosive && (I.def.activate === 'boom' || Math.random() < 0.2)) detonate(I);
+    if (I.def.molotov) breakMolotov(I);
+    if (flammable(I) && Math.random() < 0.15) ignite(I);
+  }
+  if (best.u && best.u.kind !== 'ground') best.b.applyLinearImpulse(Vec2(ax.x * it.def.gun.impulse, ax.y * it.def.gun.impulse), end, true);
+}
+
+// ---------------- разрыв суставов ----------------
+const TEAR = { neck: 5200, spine: 13000, hipF: 11000, hipB: 11000, shoulderF: 6000, shoulderB: 6000, elbowF: 5000, elbowB: 5000, kneeF: 8000, kneeB: 8000 };
+function tearStep(dt) {
+  for (const h of humans) {
+    const k = h.grabbed ? 3 : 1;
+    for (const jn in h.joints) {
+      const J = h.joints[jn]; if (J.severed) continue;
+      const f = J.j.getReactionForce(1 / dt).length();
+      if (f > TEAR[jn] * k * (J.broken ? 0.6 : 1)) {
+        if (OPT.gore) severQ.push({ h, part: J.child });
+        else if (!J.broken && h.breakBone(J.child)) SFX.crack();
+      }
+    }
+  }
 }
 
 // ---------------- шаг симуляции ----------------
@@ -409,6 +567,20 @@ function tick(dt) {
   for (const it of items) {
     if (it.cd > 0) it.cd -= dt;
     if (it.firing) fireGun(it);
+    const d = it.def;
+    if (d.mine && it.armT > 0) it.armT -= dt;
+    if (it.pressT > 0) it.pressT -= dt;
+    if (d.timer && it.on) { it.timerT = (it.timerT || 0) + dt; if (it.timerT >= d.timer) { it.timerT -= d.timer; SFX.beep(900); signal(it); } }
+    if (d.thruster && it.on && !isDead(it.body)) {
+      const ax = it.body.getWorldVector(Vec2(it.dir, 0));
+      it.body.applyForceToCenter(Vec2(ax.x * d.thruster, ax.y * d.thruster), true);
+      if (Math.random() < 0.6) { const n = it.body.getWorldPoint(Vec2(-0.3 * it.dir, 0)); FX.fire(n.x, n.y, 1, 0.12); }
+      SFX.thrust();
+    }
+    if (d.wheel && it.on && !isDead(it.body)) {
+      const w = it.body.getAngularVelocity(), want = -d.wheel.speed * it.dir;
+      it.body.applyTorque(clamp((want - w) * 40, -d.wheel.torque, d.wheel.torque), true);
+    }
     if (it.fuse > 0) {
       const before = it.fuse; it.fuse -= dt;
       if (it.def.id === 'c4' && Math.floor(before * 4) !== Math.floor(it.fuse * 4)) SFX.beep(it.fuse < 0.5 ? 1800 : 1200);
@@ -427,7 +599,7 @@ function tick(dt) {
   const t0 = performance.now();
   world.step(dt, QP.vIter, QP.pIter);
   physMs = physMs * 0.9 + (performance.now() - t0) * 0.1;
-  processImpacts(); processStabs(); processSlashes(); checkStuck(); processSevers(); processExplosions();
+  processImpacts(); processStabs(); processSlashes(); checkStuck(); tearStep(dt); processSevers(); processPresses(); burnStep(dt); processExplosions();
   // защита от разлёта и NaN
   const bad = [];
   for (let b = world.getBodyList(); b; b = b.getNext()) {
@@ -439,6 +611,16 @@ function tick(dt) {
     const w = b.getAngularVelocity(); if (Math.abs(w) > 60) b.setAngularVelocity(Math.sign(w) * 60);
   }
   for (const b of bad) removeOwner(b.getUserData());
+}
+
+function processPresses() {
+  for (const it of pressQ) {
+    if (isDead(it.body)) continue;
+    if (it.def.mine) { if (it.fuse <= 0) { it.fuse = it.def.explosive.fuse; SFX.beep(2000); } continue; }
+    if (it.pressT > 0) continue;
+    it.pressT = 0.35; SFX.button(); signal(it);
+  }
+  pressQ.length = 0;
 }
 
 // капли крови из ран и культей (визуально, раз в кадр)
@@ -456,6 +638,7 @@ function bleedFX(dt, v) {
         FX.blood(wp.x, wp.y, 0, 0, 1, 0.4);
       }
     }
+    if (h.dummy) continue;
     for (const s of h.stumps) {
       if (s.t <= 0) continue;
       s.t -= dt;
@@ -477,7 +660,7 @@ function resize() {
 }
 addEventListener('resize', resize); resize();
 cam.zoom = H / 9.5;
-cam.x = 0.6 - 98 * DPR / cam.zoom; // центр сцены правее каталога
+cam.x = 0.6 - 110 * DPR / cam.zoom; // центр сцены правее каталога
 const toWorld = (sx, sy) => Vec2((sx * DPR - W / 2) / cam.zoom + cam.x, -(sy * DPR - H / 2) / cam.zoom + cam.y);
 function view() {
   const hw = W / 2 / cam.zoom, hh = H / 2 / cam.zoom;
@@ -497,11 +680,14 @@ const keys = new Set();
 const TOOLS = [
   { id: 'drag', key: '1', name: 'Рука', hint: 'Тащите предметы и людей. Q/E — вращать. Оружие поднесите к руке человека, чтобы он его взял.' },
   { id: 'rope', key: '2', name: 'Верёвка', hint: 'Щёлкните по первому объекту, затем по второму (или по пустому месту — привязать к точке).' },
-  { id: 'weld', key: '3', name: 'Сварка', hint: 'Щёлкните по двум объектам, чтобы намертво соединить их.' },
-  { id: 'freeze', key: '4', name: 'Заморозка', hint: 'Щёлкните по объекту, чтобы закрепить его в воздухе. Повторный щелчок — снять.' },
-  { id: 'erase', key: '5', name: 'Ластик', hint: 'Щёлкните по объекту или верёвке, чтобы удалить.' },
-  { id: 'boom', key: '6', name: 'Взрыв', hint: 'Щёлкните, чтобы устроить взрыв в этом месте.' },
-  { id: 'cut', key: '7', name: 'Скальпель', hint: 'Щёлкните по части тела, чтобы отрезать её (нужно включённое расчленение).' },
+  { id: 'spring', key: '3', name: 'Пружина', hint: 'Щёлкните по двум объектам (или по объекту и пустому месту) — соединит упругой пружиной.' },
+  { id: 'weld', key: '4', name: 'Сварка', hint: 'Щёлкните по двум объектам, чтобы намертво соединить их.' },
+  { id: 'wire', key: '5', name: 'Провод', hint: 'Провод активации: щёлкните по источнику (кнопка, таймер…), затем по цели (бомба, оружие, ускоритель…).' },
+  { id: 'freeze', key: '6', name: 'Заморозка', hint: 'Щёлкните по объекту, чтобы закрепить его в воздухе. Повторный щелчок — снять.' },
+  { id: 'erase', key: '7', name: 'Ластик', hint: 'Щёлкните по объекту, верёвке или проводу, чтобы удалить.' },
+  { id: 'fire', key: '8', name: 'Огонь', hint: 'Щёлкните по человеку или деревянному предмету, чтобы поджечь.' },
+  { id: 'boom', key: '9', name: 'Взрыв', hint: 'Щёлкните, чтобы устроить взрыв в этом месте.' },
+  { id: 'cut', key: '0', name: 'Скальпель', hint: 'Щёлкните по части тела, чтобы отрезать её (нужно включённое расчленение).' },
 ];
 
 function pick(p) {
@@ -532,6 +718,16 @@ function linkAt(p) {
   }
   return null;
 }
+function wireAt(p) {
+  const tol = 8 * DPR / cam.zoom;
+  for (const w of wires) {
+    const a = w.from.body.getPosition(), b = w.to.body.getPosition();
+    const dx = b.x - a.x, dy = b.y - a.y, L2 = dx * dx + dy * dy || 1;
+    const t = clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / L2, 0, 1);
+    if (Math.hypot(a.x + dx * t - p.x, a.y + dy * t - p.y) < tol) return w;
+  }
+  return null;
+}
 function massOf(u) {
   if (u.kind === 'part') { let m = 0; for (const n in u.human.parts) { const p = u.human.parts[n]; if (p.connected === u.part.connected) m += p.body.getMass(); } return m; }
   return u.item.body.getMass() + (u.item.holder ? HUMAN_MASS : 0);
@@ -559,7 +755,22 @@ canvas.addEventListener('pointerdown', e => {
       if (hit.u.kind === 'part') hit.u.human.grabbed = 1;
       break;
     }
-    case 'rope': case 'weld': {
+    case 'wire': {
+      if (!hit || hit.u.kind !== 'item') { toast('Провод соединяет предметы (не людей)'); return; }
+      if (!toolA) { toolA = { body: hit.body, point: Vec2(p.x, p.y), item: hit.u.item }; SFX.click(); return; }
+      if (toolA.item === hit.u.item) { toast('Нужен другой предмет'); return; }
+      if (!wires.some(w => w.from === toolA.item && w.to === hit.u.item)) wires.push({ from: toolA.item, to: hit.u.item });
+      SFX.button(); toast(`Провод: ${toolA.item.def.name} → ${hit.u.item.def.name}`); toolA = null;
+      break;
+    }
+    case 'fire': {
+      if (!hit) return;
+      const t = hit.u.kind === 'part' ? hit.u.part : hit.u.item;
+      if (!flammable(t)) { toast('Это не горит'); return; }
+      ignite(t); FX.fire(p.x, p.y, 8, 0.3);
+      break;
+    }
+    case 'rope': case 'weld': case 'spring': {
       const pt = { body: hit ? hit.body : ground, point: Vec2(p.x, p.y) };
       if (!toolA) { toolA = pt; if (!hit && tool === 'weld') { toolA = null; toast('Щёлкните по объекту'); } SFX.click(); return; }
       if (pt.body === toolA.body) { toast('Нужен другой объект'); return; }
@@ -569,7 +780,10 @@ canvas.addEventListener('pointerdown', e => {
     case 'freeze': if (hit) toggleFreeze(hit); break;
     case 'erase': {
       if (hit) { removeOwner(hit.u); SFX.erase(); }
-      else { const l = linkAt(p); if (l) { world.destroyJoint(l.joint); links = links.filter(x => x !== l); SFX.erase(); } }
+      else {
+        const l = linkAt(p); if (l) { world.destroyJoint(l.joint); links = links.filter(x => x !== l); SFX.erase(); }
+        else { const w = wireAt(p); if (w) { wires = wires.filter(x => x !== w); SFX.erase(); } }
+      }
       break;
     }
     case 'boom': explode(p.x, p.y, { R: 4, power: 18, dmg: 1.2 }); break;
@@ -636,17 +850,20 @@ addEventListener('keydown', e => {
     return;
   }
   if (!$('menu').hidden) return;
-  const tl = TOOLS.find(t => t.key === e.key); if (tl) { setTool(tl.id); return; }
+  const tl = TOOLS.find(t => 'Digit' + t.key === code); if (tl) { setTool(tl.id); return; }
   const h = hover || null;
   switch (code) {
-    case 'Space': e.preventDefault(); togglePause(); break;
+    case 'Space': e.preventDefault(); toggleSlow(); break;
+    case 'KeyP': togglePause(); break;
     case 'KeyT': toggleSlow(); break;
+    case 'Tab': e.preventDefault(); $('catalog').classList.toggle('hide'); break;
     case 'KeyG': cycleGravity(); break;
     case 'KeyF': if (h && h.u.kind === 'item') activate(h.u.item); else if (h && h.u.kind === 'part' && h.u.human.held) activate(h.u.human.held.item); break;
     case 'Delete': case 'Backspace': if (h) { removeOwner(h.u); SFX.erase(); } break;
     case 'KeyX': if (placing) placeDir = -placeDir; else if (h) flipOwner(h.u); break;
     case 'KeyZ': if (h) toggleFreeze(h); break;
     case 'KeyH': if (h && h.u.kind === 'part') { h.u.human.heal(); SFX.spawn(); } break;
+    case 'KeyC': if (h) { const t = h.u.kind === 'part' ? h.u.part : h.u.item; if (flammable(t)) ignite(t); } break;
     case 'KeyQ': if (drag) drag.rot = 1; break;
     case 'KeyE': if (drag) drag.rot = -1; break;
   }
@@ -659,7 +876,7 @@ addEventListener('blur', () => { keys.clear(); if (drag) endDrag(); });
 
 function placeAt(def, p) {
   audioInit();
-  if (def.human) { const h = spawnHuman(p.x, p.y - 0.95, placeDir); if (h) SFX.spawn(); return h; }
+  if (def.human) { const h = spawnHuman(p.x, p.y - 0.95, placeDir, { dummy: def.dummy }); if (h) SFX.spawn(); return h; }
   const it = spawnItem(def, p.x, p.y, placeDir); SFX.spawn(); return it;
 }
 function makeLink(type, A, B) {
@@ -669,6 +886,11 @@ function makeLink(type, A, B) {
     joint = world.createJoint(new RopeJoint({ maxLength: len, localAnchorA: A.body.getLocalPoint(A.point), localAnchorB: B.body.getLocalPoint(B.point), collideConnected: true }, A.body, B.body));
     links.push({ type, joint, a: A.body, b: B.body, la: A.body.getLocalPoint(A.point), lb: B.body.getLocalPoint(B.point), len });
     SFX.rope();
+  } else if (type === 'spring') {
+    const len = Math.max(0.1, Vec2.distance(A.point, B.point));
+    joint = world.createJoint(new DistanceJoint({ frequencyHz: 2.2, dampingRatio: 0.15, length: len, collideConnected: true }, A.body, B.body, A.point, B.point));
+    links.push({ type, joint, a: A.body, b: B.body, la: A.body.getLocalPoint(A.point), lb: B.body.getLocalPoint(B.point), len });
+    SFX.boing();
   } else {
     joint = world.createJoint(new WeldJoint({}, A.body, B.body, B.point));
     links.push({ type, joint, a: A.body, b: B.body, la: A.body.getLocalPoint(B.point), lb: B.body.getLocalPoint(B.point) });
@@ -734,17 +956,29 @@ function buildUI() {
     tl.appendChild(b);
   }
   const cat = $('catalog');
-  for (const c of CATEGORIES) {
-    const h = document.createElement('div'); h.className = 'cat'; h.textContent = c; cat.appendChild(h);
-    const grid = document.createElement('div'); grid.className = 'grid'; cat.appendChild(grid);
+  const tabs = document.createElement('div'); tabs.className = 'tabs'; cat.appendChild(tabs);
+  const grid = document.createElement('div'); grid.className = 'grid'; cat.appendChild(grid);
+  const showCat = c => {
+    for (const t of tabs.children) t.classList.toggle('on', t.dataset.cat === c);
+    grid.innerHTML = '';
     for (const d of CATALOG.filter(x => x.cat === c)) {
-      const b = document.createElement('button'); b.className = 'item'; b.dataset.id = d.id; b.title = d.name;
+      const b = document.createElement('button'); b.className = 'item' + (placing === d ? ' on' : ''); b.dataset.id = d.id; b.title = d.name;
       b.appendChild(iconCanvas(d, 56));
       const s = document.createElement('span'); s.textContent = d.name; b.appendChild(s);
       b.onclick = () => { audioInit(); setPlacing(placing === d ? null : d); SFX.click(); };
       grid.appendChild(b);
     }
+    localStorage.setItem('rl_tab', c);
+  };
+  for (const c of CATEGORIES) {
+    const t = document.createElement('button'); t.className = 'tab'; t.dataset.cat = c;
+    const first = CATALOG.find(x => x.cat === c);
+    t.appendChild(iconCanvas(first, 30)); const s = document.createElement('span'); s.textContent = c; t.appendChild(s);
+    t.onclick = () => { showCat(c); SFX.click(); };
+    tabs.appendChild(t);
   }
+  showCat(CATEGORIES.includes(localStorage.getItem('rl_tab')) ? localStorage.getItem('rl_tab') : CATEGORIES[0]);
+  $('bHide').onclick = () => cat.classList.toggle('hide');
   $('bPause').onclick = togglePause; $('bSlow').onclick = toggleSlow; $('bGrav').onclick = cycleGravity;
   $('bClear').onclick = () => { clearAll(); toast('Всё очищено'); };
   $('bMenu').onclick = toggleMenu;
@@ -763,8 +997,8 @@ function buildUI() {
   setTool('drag');
 }
 const vol = () => +(localStorage.getItem('rl_vol') || 0.55);
-function togglePause() { paused = !paused; $('bPause').classList.toggle('on', paused); $('bPause').textContent = paused ? '▶ Пуск' : '⏸ Пауза'; }
-function toggleSlow() { timeScale = timeScale === 1 ? 0.25 : 1; $('bSlow').classList.toggle('on', timeScale < 1); }
+function togglePause() { paused = !paused; $('bPause').classList.toggle('on', paused); $('bPause').textContent = paused ? '▶ Пуск (P)' : '⏸ Пауза (P)'; }
+function toggleSlow() { slowTarget = slowTarget === 1 ? 0.2 : 1; $('bSlow').classList.toggle('on', slowTarget < 1); $('slowmo').classList.toggle('on', slowTarget < 1); }
 function cycleGravity() {
   gIndex = (gIndex + 1) % GRAV.length; world.setGravity(Vec2(0, GRAV[gIndex].g));
   for (let b = world.getBodyList(); b; b = b.getNext()) b.setAwake(true);
@@ -790,6 +1024,8 @@ function openCtx(sx, sy) {
     if (h.alive && !h.conscious) add('Привести в чувство', () => h.wake());
     if (h.alive) add('Убить', () => { h.kill(); SFX.die(); });
     add('Развернуть (X)', () => flipOwner(hit.u));
+    if (h.isBurning()) add('Потушить', () => { for (const n in h.parts) h.parts[n].burn = 0; });
+    else add('Поджечь (C)', () => ignite(part));
     if (h.held) { add('Выстрелить / активировать (F)', () => activate(h.held.item)); add('Выронить оружие', () => dropHeld(h)); }
     if (part.joint && !part.broken) add('Сломать кость', () => { if (h.breakBone(part.name)) SFX.crack(); });
     if (part.joint && OPT.gore && !h.joints[part.joint].severed) add('Отрезать эту часть', () => { severQ.push({ h, part: part.name }); processSevers(); }, 'red');
@@ -802,6 +1038,8 @@ function openCtx(sx, sy) {
     if (it.def.hold && !it.holder) { const nh = nearestHuman(p); if (nh) add('Дать ближайшему человеку', () => giveItem(nh, it)); }
     if (it.holder) add('Выпустить из рук', () => dropHeld(it.holder));
     if (it.stuck) add('Вытащить', () => unstick(it));
+    if (it.burn > 0) add('Потушить', () => { it.burn = 0; }); else if (flammable(it)) add('Поджечь (C)', () => ignite(it));
+    if (wires.some(w => w.from === it || w.to === it)) add('Убрать провода', () => { wires = wires.filter(w => w.from !== it && w.to !== it); });
     add('Развернуть (X)', () => flipOwner(hit.u));
     add(it.frozen ? 'Разморозить (Z)' : 'Заморозить (Z)', () => toggleFreeze(hit));
     if (links.some(l => l.a === it.body || l.b === it.body)) add('Убрать верёвки и сварку', () => {
@@ -829,6 +1067,7 @@ function drawItem(it, hl) {
   const b = it.body, p = b.getPosition();
   ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(b.getAngle());
   drawShapes(ctx, it.def, it.dir, it);
+  if (it.char > 0.02) fillShapes(ctx, it.def, it.dir, `rgba(20,14,10,${Math.min(0.85, it.char)})`);
   if (it.frozen) strokeShapes(ctx, it.def, it.dir, '#6fd3ff', 0.025);
   if (hl) strokeShapes(ctx, it.def, it.dir, hl, 2.2 * DPR / cam.zoom);
   ctx.restore();
@@ -838,7 +1077,13 @@ function humanInView(h, v) { for (const n in h.parts) { const p = h.parts[n].bod
 function drawLinks(px) {
   for (const l of links) {
     const a = l.a.getWorldPoint(l.la), b = l.b.getWorldPoint(l.lb);
-    if (l.type === 'rope') {
+    if (l.type === 'spring') {
+      const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy) || 1, nx = -dy / L, ny = dx / L, N = 14;
+      ctx.strokeStyle = '#b8c4d0'; ctx.lineWidth = Math.max(0.02, 2 / px); ctx.beginPath(); ctx.moveTo(a.x, a.y);
+      for (let i = 1; i < N; i++) { const t = i / N, o = (i % 2 ? 1 : -1) * 0.07; ctx.lineTo(a.x + dx * t + nx * o, a.y + dy * t + ny * o); }
+      ctx.lineTo(b.x, b.y); ctx.stroke();
+      ctx.fillStyle = '#6b7684'; for (const q of [a, b]) { ctx.beginPath(); ctx.arc(q.x, q.y, 0.035, 0, 7); ctx.fill(); }
+    } else if (l.type === 'rope') {
       const d = Vec2.distance(a, b), slack = Math.max(0, l.len - d);
       ctx.strokeStyle = '#c9a86a'; ctx.lineWidth = Math.max(0.025, 2 / px);
       ctx.beginPath(); ctx.moveTo(a.x, a.y);
@@ -853,22 +1098,24 @@ function drawLinks(px) {
   }
 }
 function render(dt) {
-  if (bgH !== H) { bgGrad = ctx.createLinearGradient(0, 0, 0, H); bgGrad.addColorStop(0, '#3a3e45'); bgGrad.addColorStop(1, '#25272b'); bgH = H; }
+  if (bgH !== H) { bgGrad = ctx.createLinearGradient(0, 0, 0, H); bgGrad.addColorStop(0, '#2e3035'); bgGrad.addColorStop(1, '#1e1f22'); bgH = H; }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = bgGrad; ctx.fillRect(0, 0, W, H);
   const px = cam.zoom;
   const sx = shake > 0 ? (Math.random() - 0.5) * shake * px * 0.5 : 0, sy = shake > 0 ? (Math.random() - 0.5) * shake * px * 0.5 : 0;
   ctx.setTransform(px, 0, 0, -px, W / 2 - cam.x * px + sx, H / 2 + cam.y * px + sy);
   const v = view();
-  // сетка
-  const step = px > 40 ? 1 : 5;
-  ctx.lineWidth = 1 / px; ctx.strokeStyle = 'rgba(255,255,255,0.045)'; ctx.beginPath();
-  for (let x = Math.floor(v.x0 / step) * step; x <= v.x1; x += step) { ctx.moveTo(x, Math.max(0, v.y0)); ctx.lineTo(x, v.y1); }
-  for (let y = Math.max(0, Math.floor(v.y0 / step) * step); y <= v.y1; y += step) { ctx.moveTo(v.x0, y); ctx.lineTo(v.x1, y); }
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.beginPath();
-  for (let x = Math.floor(v.x0 / 5) * 5; x <= v.x1; x += 5) { ctx.moveTo(x, Math.max(0, v.y0)); ctx.lineTo(x, v.y1); }
-  ctx.stroke();
+  // сетка: мелкая «миллиметровка» + метровые и пятиметровые линии
+  const gridLines = (st, color) => {
+    ctx.strokeStyle = color; ctx.beginPath();
+    for (let x = Math.floor(v.x0 / st) * st; x <= v.x1; x += st) { ctx.moveTo(x, Math.max(0, v.y0)); ctx.lineTo(x, v.y1); }
+    for (let y = Math.max(0, Math.floor(v.y0 / st) * st); y <= v.y1; y += st) { ctx.moveTo(v.x0, y); ctx.lineTo(v.x1, y); }
+    ctx.stroke();
+  };
+  ctx.lineWidth = 1 / px;
+  if (px > 70) gridLines(0.25, 'rgba(255,255,255,0.025)');
+  if (px > 25) gridLines(1, 'rgba(255,255,255,0.05)');
+  gridLines(5, 'rgba(255,255,255,0.085)');
   // стены и пол
   ctx.fillStyle = '#17181b';
   if (v.x0 < WORLD.x0) ctx.fillRect(v.x0, v.y0, WORLD.x0 - v.x0, v.y1 - v.y0);
@@ -897,6 +1144,27 @@ function render(dt) {
     drawItem(it, hl && hl.u.item === it ? hlColor : null); drawnItems++;
   }
   drawLinks(px);
+  // провода активации
+  for (const w of wires) {
+    const a = w.from.body.getPosition(), b = w.to.body.getPosition();
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2 - Math.min(1, Math.hypot(b.x - a.x, b.y - a.y) * 0.15);
+    ctx.strokeStyle = 'rgba(80,200,255,0.75)'; ctx.lineWidth = Math.max(0.015, 1.6 * DPR / px);
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.quadraticCurveTo(mx, my, b.x, b.y); ctx.stroke();
+    ctx.fillStyle = '#50c8ff'; ctx.beginPath(); ctx.arc(b.x, b.y, 0.03, 0, 7); ctx.fill();
+  }
+  // свет ламп
+  for (const it of items) if (it.def.lamp && it.on) {
+    const q = it.body.getWorldPoint(Vec2(0, 0.04)); if (!inView(q.x, q.y, 4, v)) continue;
+    const g = ctx.createRadialGradient(q.x, q.y, 0, q.x, q.y, 3.5); g.addColorStop(0, 'rgba(255,240,170,0.35)'); g.addColorStop(1, 'rgba(255,240,170,0)');
+    ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = g; ctx.beginPath(); ctx.arc(q.x, q.y, 3.5, 0, 7); ctx.fill(); ctx.globalCompositeOperation = 'source-over';
+  }
+  // лазерные лучи
+  for (const bm of beams) {
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = `rgba(80,160,255,${bm.life * 4})`; ctx.lineWidth = 0.06; ctx.beginPath(); ctx.moveTo(bm.x0, bm.y0); ctx.lineTo(bm.x1, bm.y1); ctx.stroke();
+    ctx.strokeStyle = `rgba(220,240,255,${bm.life * 9})`; ctx.lineWidth = 0.018; ctx.stroke();
+    ctx.globalCompositeOperation = 'source-over';
+  }
   FX.drawFX(ctx, v, px);
   // перетаскивание
   if (drag) {
@@ -911,7 +1179,7 @@ function render(dt) {
   // первая точка верёвки/сварки
   if (toolA) {
     const a = toolA.body === ground ? toolA.point : toolA.body.getWorldPoint(toolA.body.getLocalPoint(toolA.point));
-    ctx.strokeStyle = tool === 'rope' ? '#c9a86a' : '#ffcf40'; ctx.lineWidth = 2 * DPR / px; ctx.setLineDash([0.08, 0.06]);
+    ctx.strokeStyle = tool === 'rope' ? '#c9a86a' : tool === 'wire' ? '#50c8ff' : tool === 'spring' ? '#b8c4d0' : '#ffcf40'; ctx.lineWidth = 2 * DPR / px; ctx.setLineDash([0.08, 0.06]);
     ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(mouse.w.x, mouse.w.y); ctx.stroke(); ctx.setLineDash([]);
   }
   // призрак размещаемого предмета
@@ -937,12 +1205,13 @@ function updateTip() {
   let html;
   if (u.kind === 'part') {
     const h = u.human, p = u.part, st = h.state();
-    html = `<b>Человек #${h.id}</b> — <span class="st-${st}">${STATE_RU[st]}</span><br>Кровь: ${Math.max(0, Math.round(h.blood * 100))}%` +
+    html = `<b>${h.dummy ? 'Манекен' : 'Человек'} #${h.id}</b> — <span class="st-${st}">${STATE_RU[st]}</span><br>Кровь: ${Math.max(0, Math.round(h.blood * 100))}%` +
       `<br>${PART_RU[p.name]}: ${Math.max(0, Math.round(p.hp * 100))}%${p.broken ? ', <span class="st-dead">перелом</span>' : ''}${p.bleed > 0.02 ? ', кровотечение' : ''}` +
-      (h.held ? `<br>В руке: ${h.held.item.def.name}` : '');
+      (h.held ? `<br>В руке: ${h.held.item.def.name}` : '') + (h.isBurning() ? '<br><span class="st-dead">горит!</span>' : '') +
+      (h.adren > 0 ? '<br>Адреналин' : '') + (h.strong > 0 ? '<br>Сила' : '') + (h.poison > 0 && h.alive ? '<br><span class="st-out">отравлен</span>' : '');
   } else {
     const it = u.item;
-    html = `<b>${it.def.name}</b>` + (it.def.hold && !it.holder ? '<br><small>поднесите к руке человека</small>' : '') + (activateLabel(it) ? `<br><small>F — ${activateLabel(it).toLowerCase()}</small>` : '') +
+    html = `<b>${it.def.name}</b>` + (it.burn > 0 ? ' <span class="st-dead">горит</span>' : '') + (wires.some(w => w.from === it) ? '<br><small>провода: ' + wires.filter(w => w.from === it).length + '</small>' : '') + (it.def.hold && !it.holder ? '<br><small>поднесите к руке человека</small>' : '') + (activateLabel(it) ? `<br><small>F — ${activateLabel(it).toLowerCase()}</small>` : '') +
       (it.fuse > 0 ? `<br>Таймер: ${it.fuse.toFixed(1)} с` : '');
   }
   tip.innerHTML = html; tip.hidden = false;
@@ -965,6 +1234,9 @@ function frame(now) {
   mouse.w = toWorld(mouse.sx, mouse.sy);
   if (drag) drag.target = Vec2(mouse.w.x, mouse.w.y);
   hover = mouse.inside && !pan ? pick(mouse.w) : null;
+  timeScale += (slowTarget - timeScale) * Math.min(1, dtReal * 6);
+  if (Math.abs(timeScale - slowTarget) < 0.005) timeScale = slowTarget;
+  setRate(0.45 + 0.55 * Math.sqrt(timeScale)); $('slowmo').style.opacity = ((1 - timeScale) / 0.8).toFixed(2);
   const running = !paused && !menuPaused;
   if (running) {
     acc += dtReal; let n = 0;
@@ -972,7 +1244,10 @@ function frame(now) {
     if (n === 3) acc = 0;
   }
   const v = view();
-  if (running) { bleedFX(dtReal * timeScale, v); FX.updateFX(dtReal * timeScale, world.getGravity().y); }
+  if (running) {
+    bleedFX(dtReal * timeScale, v); fireFX(dtReal * timeScale, v); FX.updateFX(dtReal * timeScale, world.getGravity().y);
+    for (let i = beams.length - 1; i >= 0; i--) if ((beams[i].life -= dtReal * timeScale) <= 0) beams.splice(i, 1);
+  }
   shake = Math.max(0, shake - dtReal * 2);
   lastDraw = render(dtReal);
   updateTip();
@@ -994,11 +1269,13 @@ function demoScene() {
   const gun = spawnItem(byId.pistol, -2, 1.2, 1); giveItem(a, gun);
   spawnItem(byId.crate, 5.6, 0.4); spawnItem(byId.crate, 5.7, 1.2); spawnItem(byId.barrel, 7, 0.45);
   spawnItem(byId.spikes, -5.5, 0.05); spawnItem(byId.knife, -4, 0.1); spawnItem(byId.grenade, -3.6, 0.1);
+  // кнопка, подключённая проводом к бочке
+  const btn = spawnItem(byId.button, 9, 0.05); const brl = spawnItem(byId.barrel, 11, 0.45); wires.push({ from: btn, to: brl });
   return [a, b, c];
 }
 demoScene();
 requestAnimationFrame(frame);
 
 // для отладки и автотестов
-window.__lab = { world, humans, items, get links() { return links; }, get stuck() { return stuck; }, spawnHuman, spawnItem, byId, giveItem, dropHeld, fireGun, activate, explode, tick, clearAll,
+window.__lab = { world, humans, items, get wires() { return wires; }, ignite, inject, firePatches, setSlow: v => { slowTarget = v; }, get links() { return links; }, get stuck() { return stuck; }, spawnHuman, spawnItem, byId, giveItem, dropHeld, fireGun, activate, explode, tick, clearAll,
   cam, toWorld, removeHuman, removeItem, makeLink, ground, toggleFreeze, severQ, processSevers, FX, setPaused: v => { paused = v; }, closeMenu: () => toggleMenu(false), state: () => ({ time, paused, menuPaused, physMs, frameMs }) };
