@@ -7,7 +7,7 @@ import {
 import { buildWorld, disposeWorld, S, WH } from './world.js';
 import { M, labelTexture, beamTexture, glowTexture, setAniso } from './textures.js';
 import { audioInit, SFX, noise as sndNoise } from './audio.js';
-import { QP, QNAME, GPU, AUTO, PRESETS, setPreset, stdMat as qMat } from './quality.js';
+import { QP, QNAME, QUALITY, GPU, AUTO, PERF, PERF_AUTO, WEAK_GPU, PRESETS, setPreset, setPerf, stdMat as qMat } from './quality.js';
 
 const $ = id => document.getElementById(id);
 const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
@@ -93,23 +93,15 @@ if (Q.dust) {
   scene.add(dust);
 }
 
-// --- динамическое разрешение: держим ~55+ FPS, понижая/повышая внутреннее разрешение
-const DR = { scale: Q.scaleStart, frames: 0, acc: 0, fps: 60, cooldown: 2, enabled: localStorage.getItem('digger3d_dr') !== '0' };
-function applyScale() {
-  const base = Math.min(window.devicePixelRatio || 1, 2);
-  renderer.setPixelRatio(Math.max(0.35, base * DR.scale));
-}
-function updateDR(dt) {
-  DR.frames++; DR.acc += dt;
-  if (DR.acc < 1) return;
-  DR.fps = DR.frames / DR.acc; DR.frames = 0; DR.acc = 0;
-  const el = $('fps');
-  if (el) el.textContent = `${Math.round(DR.fps)} FPS · ${Math.round(DR.scale * 100)}%`;
-  if (!DR.enabled || G.state !== 'play') return;
-  DR.cooldown--;
-  if (DR.cooldown > 0) return;
-  if (DR.fps < Q.targetFps - 8 && DR.scale > Q.scaleMin + 0.001) { DR.scale = Math.max(Q.scaleMin, DR.scale - (DR.fps < 35 ? 0.15 : 0.07)); applyScale(); DR.cooldown = 2; }
-  else if (DR.fps > Q.targetFps + 3 && DR.scale < Q.scaleMax - 0.001) { DR.scale = Math.min(Q.scaleMax, DR.scale + 0.05); applyScale(); DR.cooldown = 3; }
+// --- разрешение всегда родное (без понижения), считаем только FPS
+const FPSC = { frames: 0, acc: 0 };
+function applyScale() { renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); }
+function updateFPS(dt) {
+  FPSC.frames++; FPSC.acc += dt;
+  if (FPSC.acc < 0.5) return;
+  const fps = FPSC.frames / FPSC.acc; FPSC.frames = 0; FPSC.acc = 0;
+  const el = $('fps'), c = renderer.domElement;
+  if (el) el.textContent = `${Math.round(fps)} FPS · ${c.width}×${c.height}${PERF ? ' · ⚡' : ''}`;
 }
 
 function resize() {
@@ -350,14 +342,20 @@ function showBest() {
 }
 showBest();
 // --- меню графики
+const perfBox = $('optPerf');
+perfBox.checked = PERF;
+perfBox.addEventListener('change', () => setPerf(perfBox.checked));
+$('quality').classList.toggle('disabled', PERF);
 document.querySelectorAll('#quality button').forEach(b => {
-  b.classList.toggle('on', AUTO ? b.dataset.q === 'auto' : b.dataset.q === QNAME);
-  if (b.dataset.q === 'auto' && AUTO) b.textContent = `Авто: ${PRESETS[QNAME].label}`;
+  b.classList.toggle('on', AUTO ? b.dataset.q === 'auto' : b.dataset.q === QUALITY);
+  if (b.dataset.q === 'auto' && AUTO) b.textContent = `Авто: ${PRESETS[QUALITY].label}`;
   b.addEventListener('click', () => setPreset(b.dataset.q));
 });
-$('gpuInfo').textContent = (GPU ? 'Видеокарта: ' + GPU.replace(/^ANGLE \(|\)$/g, '').replace(/ Direct3D.*$/, '').slice(0, 70) : 'Видеокарта не определена') + ` → пресет «${PRESETS[QNAME].label}»`;
-const drBox = $('optDR'), fpsBox = $('optFPS');
-drBox.checked = DR.enabled; drBox.addEventListener('change', () => { DR.enabled = drBox.checked; localStorage.setItem('digger3d_dr', DR.enabled ? '1' : '0'); if (!DR.enabled) { DR.scale = Math.min(1, Q.scaleMax); applyScale(); } });
+const gpuName = GPU ? GPU.replace(/^ANGLE \(|\)$/g, '').replace(/ Direct3D.*$/, '').slice(0, 70) : 'не определена';
+$('gpuInfo').textContent = `Видеокарта: ${gpuName}` + (PERF
+  ? ` · включён режим производительности${PERF_AUTO ? ' (автоматически: слабая видеокарта)' : ''}`
+  : (WEAK_GPU ? ' · видеокарта слабая — если тормозит, включи режим производительности' : ''));
+const fpsBox = $('optFPS');
 const showFps = v => { $('fps').classList.toggle('hidden', !v); localStorage.setItem('digger3d_fps', v ? '1' : '0'); };
 fpsBox.checked = localStorage.getItem('digger3d_fps') !== '0'; showFps(fpsBox.checked);
 fpsBox.addEventListener('change', () => showFps(fpsBox.checked));
@@ -869,7 +867,7 @@ function drawMinimap() {
 let last = performance.now();
 function frame(now) {
   const rawDt = (now - last) / 1000, dt = Math.min(0.05, rawDt); last = now;
-  updateDR(rawDt);
+  updateFPS(rawDt);
   if (G.state === 'play') update(dt);
   if (world) { sync3D(dt); renderer.render(scene, camera); }
   else { // меню: медленный пролёт по пустому бомбарю отрисовывается после первой загрузки
