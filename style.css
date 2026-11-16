@@ -125,3 +125,37 @@ body.touch #prompt { bottom: 200px; font-size: 14px; }
   .batbar { width: 80px; }
   #log div { font-size: 12px; }
 }
+
+/* ================= 3D-версия ================= */
+canvas#game { cursor: default; }
+#vignette { position: fixed; inset: 0; pointer-events: none; z-index: 2;
+  background: radial-gradient(ellipse at center, rgba(0,0,0,0) 45%, rgba(0,0,0,.75) 100%); }
+#grain { position: fixed; inset: -50%; pointer-events: none; z-index: 3; opacity: .07;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  animation: grain .5s steps(4) infinite; }
+@keyframes grain { 0% { transform: translate(0,0); } 25% { transform: translate(-3%,2%); } 50% { transform: translate(2%,-3%); } 75% { transform: translate(-2%,-1%); } 100% { transform: translate(0,0); } }
+#redOverlay { position: fixed; inset: 0; pointer-events: none; z-index: 3; opacity: 0;
+  background: radial-gradient(ellipse at center, rgba(160,0,0,0) 40%, rgba(170,0,0,.55) 100%); }
+#flashOverlay { position: fixed; inset: 0; pointer-events: none; z-index: 4; background: #fff; opacity: 0; }
+#crosshair { position: fixed; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%;
+  background: rgba(255,255,255,.55); z-index: 4; pointer-events: none; box-shadow: 0 0 3px #000; }
+#minimap { position: fixed; right: 12px; top: 12px; z-index: 5; width: 180px; height: 132px;
+  background: rgba(0,0,0,.6); border: 1px solid rgba(232,197,71,.4); image-rendering: pixelated; pointer-events: none; }
+body.touch #minimap { top: 66px; width: 150px; height: 110px; }
+#hStance { font-size: 12px; color: #e8c547; min-height: 0; }
+#lockHint { position: fixed; left: 50%; top: 60%; transform: translateX(-50%); z-index: 6; background: rgba(0,0,0,.75);
+  border: 1px solid #e8c547; color: #e8c547; padding: 10px 18px; font-size: 15px; pointer-events: none; animation: pulse 1.4s infinite; }
+@keyframes pulse { 50% { opacity: .55; } }
+h2 .d3 { color: #e8c547; letter-spacing: 4px; }
+#quality { margin: 10px 0 4px; font-size: 13px; color: #9a9585; }
+#quality button { padding: 5px 10px; font-size: 13px; margin: 3px; }
+#quality button.on { border-color: #e8c547; color: #e8c547; background: #2a2614; }
+.alt { margin-top: 10px; font-size: 12px; }
+.alt a { color: #8a8575; }
+.screen { background: radial-gradient(ellipse at center, rgba(30,28,22,.88) 0%, rgba(0,0,0,.95) 75%); }
+#tbtns { grid-template-columns: 70px 70px; }
+#tbtns #btnLight { grid-column: 1; grid-row: 1; }
+#tbtns #btnAct { grid-column: 2; grid-row: 1 / span 2; }
+#tbtns #btnRun { grid-column: 1; grid-row: 2; }
+#tbtns #btnCrouch { grid-column: 1 / span 2; grid-row: 3; width: 152px; height: 52px; border-radius: 26px; font-size: 22px; }
+body.touch #crosshair { opacity: .6; }
