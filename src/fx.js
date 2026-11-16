@@ -140,7 +140,7 @@ export function drawFX(ctx, v, px) {
       case 3: {
         const k = p.life / p.max;
         ctx.globalCompositeOperation = 'lighter';
-        ctx.fillStyle = k > 0.6 ? `rgba(255,220,140,${k * 0.8})` : k > 0.3 ? `rgba(255,120,30,${k * 0.8})` : `rgba(140,40,10,${k})`;
+        ctx.fillStyle = k > 0.65 ? `rgba(255,200,90,${k * 0.6})` : k > 0.3 ? `rgba(255,110,25,${k * 0.6})` : `rgba(140,40,10,${k * 0.8})`;
         ctx.beginPath(); ctx.arc(p.x, p.y, p.size * (0.6 + k * 0.6), 0, 7); ctx.fill();
         ctx.globalCompositeOperation = 'source-over'; break;
       }

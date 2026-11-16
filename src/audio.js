@@ -1,5 +1,7 @@
 // Синтезированные звуки (WebAudio): никаких файлов, всё генерируется на лету.
 let ctx = null, master = null, noiseBuf = null;
+let RATE = 1; // скорость звука: при замедлении времени звуки ниже и длиннее
+export function setRate(r) { RATE = r; }
 const last = {};
 
 export function audioInit() {
@@ -24,9 +26,9 @@ function gate(name, minGap) {
   last[name] = t; return true;
 }
 function noise(dur, filterType, f0, f1, vol, q = 1) {
-  const t = ctx.currentTime;
+  const t = ctx.currentTime; dur /= RATE; f0 *= RATE; f1 *= RATE;
   const src = ctx.createBufferSource(); src.buffer = noiseBuf;
-  src.playbackRate.value = 0.8 + Math.random() * 0.4;
+  src.playbackRate.value = (0.8 + Math.random() * 0.4) * RATE;
   const f = ctx.createBiquadFilter(); f.type = filterType; f.Q.value = q;
   f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
   const g = ctx.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
@@ -34,7 +36,7 @@ function noise(dur, filterType, f0, f1, vol, q = 1) {
   src.start(t, Math.random() * 0.5); src.stop(t + dur + 0.05);
 }
 function tone(type, f0, f1, dur, vol, delay = 0) {
-  const t = ctx.currentTime + delay;
+  const t = ctx.currentTime + delay / RATE; dur /= RATE; f0 *= RATE; f1 *= RATE;
   const o = ctx.createOscillator(); o.type = type;
   o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
   const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.01); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
@@ -81,5 +83,13 @@ export const SFX = {
   crack() { if (!gate('crack', 0.08)) return; noise(0.05, 'highpass', 2500, 1500, 0.6, 1); tone('square', 700, 200, 0.04, 0.12); },
   weld() { if (!gate('weld', 0.05)) return; noise(0.25, 'highpass', 5000, 3000, 0.25, 1); },
   freeze() { if (!gate('freeze', 0.05)) return; tone('sine', 1800, 2600, 0.25, 0.08); tone('triangle', 2400, 3600, 0.18, 0.05, 0.05); },
+  zap() { if (!gate('zap', 0.05)) return; tone('sawtooth', 1800, 300, 0.12, 0.08); tone('sine', 2600, 900, 0.1, 0.06); },
+  sniper() { if (!gate('gun', 0.04)) return; noise(0.5, 'lowpass', 4000, 120, 1, 0.6); tone('square', 120, 35, 0.25, 0.4); },
+  fireOn() { if (!gate('fireOn', 0.15)) return; noise(0.5, 'lowpass', 1500, 300, 0.4, 0.8); },
+  crackle() { if (!gate('crackle', 0.12)) return; noise(0.06, 'highpass', 2500, 1200, 0.12, 2); },
+  glass() { if (!gate('glass', 0.1)) return; for (let i = 0; i < 4; i++) tone('triangle', 2500 + Math.random() * 2500, 2000, 0.15, 0.06, i * 0.02); noise(0.12, 'highpass', 5000, 3000, 0.3); },
+  button() { if (!gate('button', 0.05)) return; tone('square', 500, 450, 0.04, 0.1); tone('square', 900, 850, 0.04, 0.08, 0.05); },
+  thrust() { if (!gate('thrust', 0.35)) return; noise(0.45, 'bandpass', 500, 450, 0.18, 1.2); },
+  inject() { if (!gate('inject', 0.1)) return; tone('sine', 900, 400, 0.18, 0.08); },
   rope() { if (!gate('rope', 0.05)) return; noise(0.1, 'bandpass', 1200, 900, 0.25, 4); },
 };

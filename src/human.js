@@ -34,6 +34,7 @@ const JOINTS = {
 const STAND = { neck: 0, spine: 0.02, shoulderF: 0.12, elbowF: 0.15, shoulderB: -0.05, elbowB: 0.1, hipF: 0.06, kneeF: -0.06, hipB: -0.03, kneeB: -0.03 };
 const AIM = { shoulderF: 1.52, elbowF: 0.04, shoulderB: 1.3, elbowB: 0.45 };
 const MELEE = { shoulderF: 0.75, elbowF: 1.35 };
+const WPH = { neck: 0.4, shoulderF: 0, elbowF: 1.3, shoulderB: 2.1, elbowB: 3.0, hipF: 0.8, kneeF: 2.4, hipB: 3.9, kneeB: 5.1 };
 export const HUMAN_MASS = Object.values(PARTS).reduce((s, p) => s + p.mass, 0);
 
 const SKINS = ['#f2c9a3', '#e3b088', '#c99063', '#9a643f', '#6e4429', '#f7dcc4'];
@@ -48,7 +49,10 @@ let NEXT = 1;
 export class Human {
   constructor(world, x, y, dir = 1, opts = {}) {
     this.world = world; this.id = NEXT++; this.dir = dir; this.gid = this.id;
-    this.look = { skin: pick(SKINS), shirt: pick(SHIRTS), pants: pick(PANTS), hair: pick(HAIR), shoe: '#222222', bald: Math.random() < 0.15 };
+    this.dummy = !!opts.dummy;
+    this.look = this.dummy ? { skin: '#e8c23a', shirt: '#e8c23a', pants: '#d9b02a', hair: '#000', shoe: '#2a2a2a', bald: true }
+      : { skin: pick(SKINS), shirt: pick(SHIRTS), pants: pick(PANTS), hair: pick(HAIR), shoe: '#222222', bald: Math.random() < 0.15 };
+    this.adren = 0; this.strong = 0; this.poison = 0;
     this.blood = 1; this.pain = 0; this.stun = 0; this.alive = true; this.conscious = true;
     this.stand = 1; this.groundT = -9; this.grabbed = 0; this.held = null; this.stumps = [];
     this.parts = {}; this.joints = {};
@@ -63,7 +67,7 @@ export class Human {
       if (d.hand) { fx.push(new Circle(Vec2(0, -0.155), 0.05)); area += Math.PI * 0.0025; }
       const density = d.mass / area;
       for (const s of fx) body.createFixture(s, { density, friction: d.foot ? 0.9 : 0.6, restitution: 0.04, filterGroupIndex: -this.gid });
-      const part = { name, body, def: d, hp: 1, broken: false, wounds: [], bleed: 0, connected: true };
+      const part = { name, body, def: d, hp: 1, broken: false, wounds: [], bleed: 0, connected: true, burn: 0, char: 0 };
       body.setUserData({ kind: 'part', human: this, part });
       this.parts[name] = part;
     }
@@ -82,9 +86,10 @@ export class Human {
   handPoint(side = 'F') { return this.parts['lArm' + side].body.getWorldPoint(Vec2(0, -0.17)); }
 
   state() {
+    if (this.dummy) return 'dummy';
     if (!this.alive) return 'dead';
     if (!this.conscious) return 'out';
-    if (this.pain > 0.45 || this.stun > 0) return 'pain';
+    if (this.pain > 0.45 || this.stun > 0 || this.isBurning()) return 'pain';
     return 'ok';
   }
 
@@ -93,7 +98,9 @@ export class Human {
     const p = this.parts[partName];
     if (!p || amount <= 0) return;
     p.hp -= amount;
-    this.pain += amount * (type === 'blunt' ? 1.3 : 1.8);
+    if (this.dummy) { if (type === 'blunt' && amount > 0.35 && p.joint && Math.random() < 0.5) this.breakBone(partName); if (worldPoint && type !== 'blunt' && p.wounds.length < 8) { const lp = p.body.getLocalPoint(worldPoint); p.wounds.push({ x: lp.x, y: lp.y, r: 0.022, dent: true }); } return; }
+    if (this.adren > 0) amount *= 0.6;
+    this.pain += amount * (type === 'blunt' ? 1.3 : 1.8) * (this.adren > 0 ? 0.2 : 1);
     if (worldPoint && (type === 'sharp' || type === 'bullet' || type === 'blast' && Math.random() < 0.5)) {
       const lp = p.body.getLocalPoint(worldPoint);
       if (p.wounds.length < 8) p.wounds.push({ x: lp.x, y: lp.y, r: type === 'bullet' ? 0.022 : 0.03 + Math.random() * 0.02 });
@@ -129,7 +136,7 @@ export class Human {
     const pa = this.parts[J.parent];
     this.stumps.push({ part: p, local: p.body.getLocalPoint(anchorW), t: 4 });
     this.stumps.push({ part: pa, local: pa.body.getLocalPoint(anchorW), t: 6 });
-    p.bleed += 0.4; pa.bleed += 0.8;
+    if (!this.dummy) { p.bleed += 0.4; pa.bleed += 0.8; }
     this.pain += 1.5;
     this._connectivity();
     if (partName === 'head' || partName === 'upper') this.kill();
@@ -150,13 +157,14 @@ export class Human {
   }
   kill() { if (!this.alive) return; this.alive = false; this.conscious = false; this.stand = 0; }
   heal() {
-    this.blood = 1; this.pain = 0; this.stun = 0;
-    for (const n in this.parts) { const p = this.parts[n]; p.hp = 1; p.wounds = []; p.bleed = 0; p.broken = false; }
+    this.blood = 1; this.pain = 0; this.stun = 0; this.poison = 0;
+    for (const n in this.parts) { const p = this.parts[n]; p.hp = 1; p.wounds = []; p.bleed = 0; p.broken = false; p.burn = 0; p.char = 0; }
     for (const jn in this.joints) { const J = this.joints[jn]; if (!J.severed && J.broken) { J.broken = false; J.j.enableLimit(true); } }
     this.stumps = this.stumps.filter(s => false);
     if (this.parts.head.connected && this.joints.neck && !this.joints.neck.severed && !this.joints.spine.severed) { this.alive = true; this.conscious = true; }
   }
   wake() { if (this.alive) { this.stun = 0; this.pain = Math.min(this.pain, 0.2); if (this.blood < 0.55) this.blood = 0.55; } }
+  isBurning() { for (const n in this.parts) if (this.parts[n].burn > 0) return true; return false; }
   canStand() {
     const J = this.joints;
     for (const n of ['neck', 'spine', 'hipF', 'kneeF', 'hipB', 'kneeB']) if (J[n].severed || J[n].broken) return false;
@@ -165,6 +173,10 @@ export class Human {
 
   /** логика каждого шага физики (до world.step) */
   update(dt, time, getup, gScale) {
+    if (this.dummy) { this.alive = false; this.conscious = false; this.stand = 0; for (const jn in this.joints) { const J = this.joints[jn]; if (!J.severed) { J.j.setMaxMotorTorque(J.broken ? 0.2 : 0.6); J.j.setMotorSpeed(0); } } return; }
+    if (this.adren > 0) { this.adren -= dt; this.pain = Math.min(this.pain, 0.1); this.stun = Math.min(this.stun, 0); if (this.blood < 0.5) this.blood = 0.5; }
+    if (this.strong > 0) this.strong -= dt;
+    if (this.poison > 0) { this.poison += dt; this.pain += dt * 0.15; if (this.poison > 7) this.kill(); }
     // кровь и боль
     let bleed = 0;
     for (const n in this.parts) { const p = this.parts[n]; bleed += p.bleed; p.bleed *= 1 - 0.015 * dt; }
@@ -175,6 +187,10 @@ export class Human {
     this.conscious = this.alive && this.blood > 0.45 && this.pain < 1.4 && this.stun <= 0 && this.parts.head.hp > 0.3;
 
     const active = this.conscious && getup && !this.grabbed && this.canStand();
+    // корчится от боли/огня/яда, если лежит в сознании
+    const burning = this.isBurning();
+    const writhe = this.alive && this.conscious && (burning || this.poison > 0 || (this.stand < 0.5 && (this.pain > 0.3 || !this.canStand())));
+    const power = this.strong > 0 ? 2.2 : 1;
     this.stand = clamp(this.stand + (active ? dt * 0.5 : -dt * 4), 0, 1);
     const s = this.stand, dir = this.dir;
     const heldKind = this.held ? this.held.item.def.hold : null;
@@ -188,10 +204,16 @@ export class Human {
       let target = STAND[jn];
       if (heldKind === 'gun' && AIM[jn] !== undefined) target = AIM[jn];
       if (heldKind === 'melee' && MELEE[jn] !== undefined) target = MELEE[jn];
+      let tq = J.torque * (0.2 + 0.8 * s) * (this.parts[J.child].hp < 0.3 ? 0.4 : 1) * power;
+      if (writhe && jn !== 'spine') {
+        const ph = WPH[jn] || 0, fr = burning ? 9 : this.poison > 0 ? 14 : 4.5;
+        target = target * 0.3 + Math.sin(time * fr + ph) * (jn === 'neck' ? 0.35 : 1.0) + (burning ? Math.sin(time * 23 + ph * 3) * 0.3 : 0);
+        tq = Math.max(tq, J.torque * 0.35);
+      }
       target *= dir;
       const ang = j.getJointAngle();
       j.setMotorSpeed(clamp((target - ang) * 10, -14, 14));
-      j.setMaxMotorTorque(J.torque * (0.2 + 0.8 * s) * (this.parts[J.child].hp < 0.3 ? 0.4 : 1));
+      j.setMaxMotorTorque(tq);
     }
     if (s <= 0.01) return;
     // ноги на опоре?
@@ -253,13 +275,18 @@ export function drawHuman(ctx, h, highlight) {
         else ctx.arc(0, 0, r * 1.04, Math.PI * -0.18, Math.PI * 0.88, false);
         ctx.lineTo(0, r * 0.15); ctx.closePath(); ctx.fill();
       }
-      drawFace(ctx, h.state(), dir, r);
+      if (h.dummy) {
+        ctx.fillStyle = '#1a1a1a'; ctx.beginPath(); ctx.arc(r * 0.35 * dir, 0.02, 0.045, 0, 7); ctx.fill();
+        ctx.fillStyle = '#e8c23a'; ctx.beginPath(); ctx.moveTo(r * 0.35 * dir, 0.02); ctx.arc(r * 0.35 * dir, 0.02, 0.045, 0, Math.PI / 2); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(r * 0.35 * dir, 0.02); ctx.arc(r * 0.35 * dir, 0.02, 0.045, Math.PI, Math.PI * 1.5); ctx.closePath(); ctx.fill();
+      } else drawFace(ctx, h.state(), dir, r);
     } else {
       const [hx, hy] = d.box;
       let col = name === 'upper' || name.startsWith('uArm') ? L.shirt : name === 'lower' || name.includes('Leg') ? L.pants : L.skin;
       ctx.fillStyle = shade(col, k);
       rr(ctx, -hx, -hy, hx * 2, hy * 2, Math.min(hx, hy) * 0.9); ctx.fill();
       if (name === 'lower') { ctx.fillStyle = shade('#3a2a1a', k); ctx.fillRect(-hx, hy - 0.04, hx * 2, 0.035); }
+      if (h.dummy && (name === 'upper' || name === 'uLegF')) { ctx.fillStyle = '#1a1a1a'; ctx.fillRect(-hx, -0.015, hx * 2, 0.03); }
       if (name === 'upper') { ctx.fillStyle = shade(col, 0.85); ctx.fillRect(-hx * 0.15 + hx * 0.55 * dir, -hy * 0.6, 0.012, hy * 1.3); }
       if (d.hand) { ctx.fillStyle = shade(L.skin, k * 0.95); ctx.beginPath(); ctx.arc(0, -0.155, 0.05, 0, 7); ctx.fill(); }
       if (d.foot) { ctx.fillStyle = shade(L.shoe, k); rr(ctx, 0.05 * dir - 0.1, -0.205, 0.2, 0.07, 0.03); ctx.fill(); }
@@ -270,9 +297,14 @@ export function drawHuman(ctx, h, highlight) {
       if (d.circle) { ctx.beginPath(); ctx.arc(0, 0, d.circle, 0, 7); ctx.fill(); }
       else { rr(ctx, -d.box[0], -d.box[1], d.box[0] * 2, d.box[1] * 2, Math.min(d.box[0], d.box[1]) * 0.9); ctx.fill(); }
     }
+    if (p.char > 0.02) {
+      ctx.fillStyle = `rgba(20,14,10,${Math.min(0.85, p.char)})`;
+      if (d.circle) { ctx.beginPath(); ctx.arc(0, 0, d.circle * 1.02, 0, 7); ctx.fill(); }
+      else { rr(ctx, -d.box[0], -d.box[1], d.box[0] * 2, d.box[1] * 2, Math.min(d.box[0], d.box[1]) * 0.9); ctx.fill(); }
+    }
     for (const w of p.wounds) {
-      ctx.fillStyle = '#6b0a0a'; ctx.beginPath(); ctx.arc(w.x, w.y, w.r, 0, 7); ctx.fill();
-      ctx.fillStyle = '#2a0303'; ctx.beginPath(); ctx.arc(w.x, w.y, w.r * 0.5, 0, 7); ctx.fill();
+      ctx.fillStyle = w.dent ? '#5a4a1a' : '#6b0a0a'; ctx.beginPath(); ctx.arc(w.x, w.y, w.r, 0, 7); ctx.fill();
+      ctx.fillStyle = w.dent ? '#2a2210' : '#2a0303'; ctx.beginPath(); ctx.arc(w.x, w.y, w.r * 0.5, 0, 7); ctx.fill();
     }
     if (highlight) {
       ctx.strokeStyle = highlight; ctx.lineWidth = 0.02;
@@ -289,7 +321,7 @@ export function drawHuman(ctx, h, highlight) {
   // культи
   for (const s of h.stumps) {
     const w = s.part.body.getWorldPoint(s.local);
-    ctx.fillStyle = '#8e1010'; ctx.beginPath(); ctx.arc(w.x, w.y, 0.05, 0, 7); ctx.fill();
+    ctx.fillStyle = h.dummy ? '#555' : '#8e1010'; ctx.beginPath(); ctx.arc(w.x, w.y, 0.05, 0, 7); ctx.fill();
     ctx.fillStyle = '#e8dcc8'; ctx.beginPath(); ctx.arc(w.x, w.y, 0.018, 0, 7); ctx.fill();
   }
 }
